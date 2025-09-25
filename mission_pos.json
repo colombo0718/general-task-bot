@@ -1,0 +1,97 @@
+{
+  "version": 3,
+  "locale": "zh-TW",
+
+  "classify_tree": {
+    "prompt_key": "identify_needs",
+    "branch": [
+      { "match": "getExistQuote", "task_id": "getexist_quote" },
+      { "match": "generateQuote", "task_id": "generate_quote" },
+      { "match": "paymentStatus", "task_id": "payment_status" },
+      { "match": "null",          "task_id": "fallback_greeting" }
+    ]
+  },
+
+  "tasks": {
+    "getexist_quote": {
+      "description": "產出報價單 PDF 並回傳下載連結",
+      "human_check": false,
+
+      "fields": {
+        "name":        { "prompt_key": "identify_name",     "required": true  , "match_pool":"customerlist.txt"}
+      },
+
+      "action": {
+        "type": "http",
+        "method": "GET",
+        "url_template": "https://plaintiff-transit-regarded-indianapolis.trycloudflare.com/api/quote?name={name}",
+        "expect_json": true,
+        "link_key": "quote_path",
+        "link_base": "https://plaintiff-transit-regarded-indianapolis.trycloudflare.com/",
+        "allow_unicode_url": true
+      },
+
+      "formatters": {
+        "tax_text":    { "from": "include_tax", "map": { "Y": "含稅", "N": "未稅", "null": "" } },
+        "start_text":  { "from": "start_month", "prefix": "從", "suffix": "月開始，", "skip_if_empty": true },
+        "months_text": { "from": "months", "prefix": "收費", "suffix": "個月", "skip_if_empty": true }
+      },
+
+      "reply_template": "你是想要[{name}]公司的{tax_text}報價單吧，{start_text}{months_text}{link_text}",
+      "error_template": "資訊不足，無法建立報價單。\n缺少：{missing_fields}\n請補充後再試。"
+    },
+
+    "generate_quote": {
+      "description": "產出報價單 PDF 並回傳下載連結",
+      "human_check": false,
+
+      "fields": {
+        "name":        { "prompt_key": "identify_name",     "required": true  , "match_pool":"customerlist.txt"},
+        "include_tax": { "prompt_key": "include_tax",       "required": false },
+        "start_month": { "prompt_key": "get_start_month",   "required": false },
+        "charge_months":      { "prompt_key": "get_charge_months", "required": false }
+      },
+
+      "action": {
+        "type": "http",
+        "method": "GET",
+        "url_template": "https://plaintiff-transit-regarded-indianapolis.trycloudflare.com/api/quote?name={name}&charge_months={charge_months}&price_includes_tax={include_tax}",
+        "expect_json": true,
+        "link_key": "quote_path",
+        "link_base": "https://plaintiff-transit-regarded-indianapolis.trycloudflare.com/",
+        "allow_unicode_url": true
+      },
+
+      "formatters": {
+        "tax_text":    { "from": "include_tax", "map": { "Y": "含稅", "N": "未稅", "null": "" } },
+        "start_text":  { "from": "start_month", "prefix": "從", "suffix": "月開始，", "skip_if_empty": true },
+        "months_text": { "from": "charge_months", "prefix": "收費", "suffix": "個月", "skip_if_empty": true }
+      },
+
+      "reply_template": "你是想要[{name}]公司的{tax_text}報價單吧，{start_text}{months_text}{link_text}",
+      "error_template": "資訊不足，無法建立報價單。\n缺少：{missing_fields}\n請補充後再試。"
+    },
+
+    "payment_status": {
+      "description": "詢問付費狀況（示意：先不連資料源）",
+      "human_check": false,
+
+      "fields": {
+        "name": { "prompt_key": "identify_name", "required": true }
+      },
+
+      "action": { "type": "none" },
+
+      "reply_template": "你是想詢問關於[{name}]的相關資訊吧",
+      "error_template": "資訊不足，無法查詢付費狀況。\n缺少：{missing_fields}"
+    },
+
+    "fallback_greeting": {
+      "description": "分類失敗時的友善提示",
+      "human_check": false,
+      "fields": {},
+      "action": { "type": "none" },
+      "reply_template": "我全葳實習小幫手，有甚麼我可以幫到你的嗎"
+    }
+  }
+}
