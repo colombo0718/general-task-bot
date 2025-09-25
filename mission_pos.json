@@ -24,10 +24,10 @@
       "action": {
         "type": "http",
         "method": "GET",
-        "url_template": "https://plaintiff-transit-regarded-indianapolis.trycloudflare.com/api/quote?name={name}",
+        "url_template": "https://cwsoft.leaflune.org/api/quote?name={name}",
         "expect_json": true,
         "link_key": "quote_path",
-        "link_base": "https://plaintiff-transit-regarded-indianapolis.trycloudflare.com/",
+        "link_base": "https://cwsoft.leaflune.org/",
         "allow_unicode_url": true
       },
 
@@ -55,10 +55,10 @@
       "action": {
         "type": "http",
         "method": "GET",
-        "url_template": "https://plaintiff-transit-regarded-indianapolis.trycloudflare.com/api/quote?name={name}&charge_months={charge_months}&price_includes_tax={include_tax}",
+        "url_template": "https://cwsoft.leaflune.org/api/quote?name={name}&charge_months={charge_months}&price_includes_tax={include_tax}",
         "expect_json": true,
         "link_key": "quote_path",
-        "link_base": "https://plaintiff-transit-regarded-indianapolis.trycloudflare.com/",
+        "link_base": "https://cwsoft.leaflune.org/",
         "allow_unicode_url": true
       },
 
