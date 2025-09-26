@@ -296,229 +296,87 @@ def gather_fields(task_id: str, mission_data: dict, user_text: str):
 def build_command(action: dict, values: dict):
     """
     回傳：
-      cmd_text: 純粹的指令文字（URL 或 SQL 語法）
-      payload:  結構化資訊，後續要執行時可以直接用
+      cmd_text: 人類可讀且實際會拿去請求的最終 URL
+      payload:  {"method": "GET/POST", "url": <final_url>, "body": <dict 或 None>}
+    備註：
+      - 僅支援 HTTP：所有資料操作一律交給後端 API
+      - 不再分 request_url / display_url；就用同一條 final_url
     """
-    a_type = action.get("type", "none")
+    url_tmpl = action.get("url_template", "")
+    method   = (action.get("method", "GET") or "GET").upper()
 
-    # ---- HTTP ----
-    if a_type == "http":
-        url_tmpl = action.get("url_template", "")
-        method   = (action.get("method", "GET") or "GET").upper()
+    used = set()
+    def _repl(m):
+        k = m.group(1)
+        used.add(k)
+        return urllib.parse.quote(str(values.get(k, "")), safe="")
 
-        used = set()
-        def _repl(m):
-            k = m.group(1)
-            used.add(k)
-            return urllib.parse.quote(str(values.get(k, "")), safe="")
+    # 先把模板參數代入
+    filled = re.sub(r"{(\w+)}", _repl, url_tmpl)
 
-        filled = re.sub(r"{(\w+)}", _repl, url_tmpl)
-        leftover = {k: v for k, v in values.items() if k not in used}
+    # 人類可讀版本（同時作為實際請求的 URL 使用）
+    final_url = urllib.parse.unquote(filled, encoding="utf-8", errors="replace")
 
-        # 人類可讀的版本（IRI）
-        display_url = urllib.parse.unquote(filled, encoding="utf-8", errors="replace")
+    # 模板沒用到的欄位：GET → 併到 query string；其他 → 當 JSON body
+    leftover = {k: v for k, v in values.items() if k not in used}
+    if method == "GET" and leftover:
+        qs = urllib.parse.urlencode(leftover, doseq=True)
+        final_url = final_url + ("&" if "?" in final_url else "?") + urllib.parse.unquote(qs, "utf-8", "replace")
+        body = None
+    else:
+        body = leftover if leftover else None
 
-        if method == "GET" and leftover:
-            qs = urllib.parse.urlencode(leftover, doseq=True)
-            display_show = display_url + ("&" if "?" in display_url else "?") + urllib.parse.unquote(qs, "utf-8", "replace")
-            request_url  = filled      + ("&" if "?" in filled      else "?") + qs
-            body = None
-        else:
-            display_show = display_url
-            request_url  = filled
-            body = leftover if leftover else None
-        print(display_show)
-        print(display_url)
-        return display_url, {"type":"http", "method":method, "command":display_url, "body":body}
+    # cmd_text 給你印在回覆裡看，payload 給下一步執行
+    return final_url, {"method": method, "url": final_url, "body": body}
 
-    # ---- SQL ----
-    if a_type == "sql":
-        sql_tmpl = action.get("template", "")
-        style    = action.get("style", "qmark")
-        fetch    = action.get("fetch", "none")
 
-        sql, args = build_sql(sql_tmpl, values, style=style)
-
-        # 產生 debug_sql（參數直接拼進 SQL，僅供驗證使用）
-        def escape(v):
-            if v is None:
-                return "NULL"
-            if isinstance(v, (int, float)):
-                return str(v)
-            return "'" + str(v).replace("'", "''") + "'"
-
-        parts = sql.split("?")
-        debug_sql = ""
-        for p, a in zip(parts, list(args) + [""]):
-            debug_sql += p + (escape(a) if a != "" else "")
-
-        # 回傳雙版本
-        return debug_sql, {
-            "type": "sql",
-            "exec_sql": sql,
-            "args": args,
-            "command": debug_sql,
-            "fetch": fetch
-        }
-
-    # ---- NONE ----
-    return "null", {"type":"none"}
-
-def execute_simple_command(payload: dict, timeout: float = 10.0):
+def execute_command(payload: dict, timeout: float = 10.0):
     """
-    目前只處理 HTTP：
-    - 以 payload['method'] 與 payload['command'] / ['request_url'] 送出請求
-    - 回傳 (quote_path, raw_json 或 None)
+    執行 HTTP API 指令：
+    - payload: {"method": "GET/POST...", "url": "...", "body": dict|None}
+    - 預期 API 回傳格式: {"ok": true/false, "info": ..., "link": ...}
+    回傳: (link, info, raw_json_or_text)
     """
-    if (payload or {}).get("type") != "http":
-        return None, None
-
     method = (payload.get("method") or "GET").upper()
-    # 若你之後在 payload 加了 request_url，就優先用；否則退回 command（你現在放的是 display_url）
-    url = payload.get("request_url") or payload.get("command") or ""
-    body = payload.get("body")  # 非 GET 時才可能用到
+    url    = payload.get("url") or ""
+    body   = payload.get("body")
 
     try:
         if method == "GET":
             resp = requests.get(url, timeout=timeout)
         else:
-            # 夠簡單：用 JSON body；若要 form 可自行改成 data=body
             resp = requests.request(method, url, json=body, timeout=timeout)
-
         resp.raise_for_status()
-        data = resp.json()  # 你的 API 會回 {"ok":true,"quote_path":"..."}
-        return data.get("quote_path"), data
+
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        data = resp.json() if "application/json" in ctype else resp.text
+
+        if isinstance(data, dict):
+            ok   = bool(data.get("ok", False))
+            link = data.get("link")
+            info = data.get("info")
+
+            # 若 ok=False 且沒有 info/link，就把 error 當 info 回傳
+            if not ok and info is None and link is None:
+                info = data.get("error")
+
+            # 統一把 dict/list 轉字串（方便模板使用）
+            if isinstance(info, (dict, list)):
+                info = json.dumps(info, ensure_ascii=False)
+
+            return link, info, data
+
+        # 如果不是 JSON，就直接當 info 處理
+        return None, str(data), data
 
     except Exception as e:
-        # 失敗就回 None；你也可以把錯誤字串回傳給上層 add()
-        return None, {"error": str(e)}
+        return None, None, {"ok": False, "error": str(e)}
 
-
-# 小幫手：執行 action 並回傳可疊加的說明文字
-def perform_action(action: dict, values: dict) -> str:
-    try:
-        if action.get("type") == "http":
-            
-            resp, data, filled_url = call_api(
-                action.get("url_template", ""),
-                values,
-                method=action.get("method", "GET"),
-                timeout=action.get("timeout", 15),
-            )
-            # print('filled_url',filled_url.encode("utf-8", "replace") )
-
-            # filled_url = urllib.parse.unquote(filled_url, encoding="utf-8", errors="replace")
-
-            # 組下載連結（expect_json + link_key）
-            if action.get("expect_json") and isinstance(data, dict):
-                link_key = action.get("link_key")
-                link_base = action.get("link_base", "")
-                allow_unicode = bool(action.get("allow_unicode_url"))
-                if link_key and data.get(link_key):
-                    raw_path = str(data.get(link_key)).lstrip("/")
-                    pretty_path = (urllib.parse.unquote(raw_path)
-                                    if allow_unicode else urllib.parse.quote(raw_path, safe="/:?&=%#"))
-                    full_url = urllib.parse.urljoin(link_base, pretty_path) if link_base else pretty_path
-                    return f"構築指令：{filled_url}\n下載連結：{full_url}"
-            # 沒有 link_key 就回傳 API 回應
-            short = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
-            return f"構築指令：{filled_url}\nAPI 回應：{short}"
-        # 無動作
-        # return "構築指令：無動作（action.type = none）"
-        return "構築指令：null"
-    except Exception as e:
-        return f"構築指令：失敗（{e}）"
-
-
-def call_api(url_template: str, params: dict, *, method: str = "GET", timeout: int = 10):
-    """
-    將 url_template 中的 {placeholder} 用 params 置換（自動 URL encode），
-    剩餘沒用到的 params：GET 放 query string，POST 放 JSON body。
-    回傳 (resp, data, filled_url)；data 會在是 JSON 時自動轉 dict。
-    """
-    used = set()
-    print(url_template,params)
-    def _repl(m):
-        k = m.group(1)
-        used.add(k)
-        return urllib.parse.quote(str(params.get(k, "")), safe="")  # 只替換模板裡的佔位符
-
-    filled_url = re.sub(r"\{(\w+)\}", _repl, url_template)
-    filled_url = urllib.parse.unquote(filled_url, encoding="utf-8", errors="replace")
-    print(filled_url)
-    leftover = {k: v for k, v in params.items() if k not in used}
-    
-    if method.upper() == "GET":
-        print(filled_url)
-        resp = requests.get(filled_url, params=leftover, timeout=timeout)
-    elif method.upper() == "POST":
-        resp = requests.post(filled_url, json=leftover, timeout=timeout)
-    else:
-        raise ValueError("Unsupported method: " + method)
-
-    ctype = (resp.headers.get("Content-Type") or "").lower()
-    data = resp.json() if "application/json" in ctype else resp.text
-    return resp, data, filled_url
-
-
-def build_sql(sql_template: str, params: dict, *, style: str = "qmark"):
-    """
-    將 sql_template 中的 {placeholder} 轉成指定參數樣式，並回傳 (sql, args)。
-    style:
-      - "qmark"    ->  "?"            （sqlite3 / 一些 DB-API）
-      - "named"    ->  ":name"        （sqlite3 支援、某些驅動）
-      - "pyformat" ->  "%(name)s"     （psycopg2 / MySQLdb 等）
-    只會替換模板中實際出現的鍵，並保持參數順序一致。
-    """
-    order = []  # 按出現順序記錄佔位鍵名
-
-    def _repl(m):
-        k = m.group(1)
-        order.append(k)
-        if style == "qmark":
-            return "?"
-        elif style == "named":
-            return f":{k}"
-        elif style == "pyformat":
-            return f"%({k})s"
-        else:
-            raise ValueError("style must be 'qmark' | 'named' | 'pyformat'")
-
-    sql = re.sub(r"{(\w+)}", _repl, sql_template)
-
-    if style == "qmark":
-        args = tuple(params[k] for k in order)
-    elif style in ("named", "pyformat"):
-        args = {k: params[k] for k in order}
-    else:
-        args = ()
-
-    return sql, args
-
-# 為新加入使用者建立資料庫
-def init_user_db(user_id: str, base_dir="databases"):
-    # 確保目錄存在
-    os.makedirs(base_dir, exist_ok=True)
-
-    # 以 user_id 命名 DB 檔案
-    db_path = os.path.join(base_dir, f"{user_id}.db")
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    # 初始化表結構（這裡先示範記帳用）
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS expenses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        item TEXT NOT NULL,
-        price REAL NOT NULL,
-        date TEXT
-    );
-    """)
 
 
 # ===== 暫存每位使用者的既有指令 =====
 todo_command = {}  
-# 結構: { user_id: {"type": "sql/http/none", "command": "實際的指令字串"} }
+# 結構: { user_id: {"method": "GET/POST...", "url": "<final_url>", "body": dict|None} }
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -549,21 +407,8 @@ def callback():
 
                 user_id = event.source.user_id
 
-                # 如果使用者沒有待辦，就初始化一筆
                 if user_id not in todo_command:
-                    todo_command[user_id] = {"command": "null","type":"none"}
-
-                # 檢查此用戶的資料庫是否存在；沒有就建立
-                db_path = os.path.join("databases", f"{user_id}.db")
-                if not os.path.exists(db_path):
-                    print(f"檢測到新加入用戶，正在建立新資料庫{db_path}")
-                    init_user_db(user_id)  # 如果你的 init_db 需要 base_dir 參數：init_db(user_id, base_dir=DB_DIR)
-                    # add(f"已為你建立專屬資料庫：{db_path}")
-                    
-                else:
-                    # 可選：debug 顯示目前使用的 DB 路徑
-                    print(f"使用資料庫：{db_path}")
-                    pass
+                    todo_command[user_id] = {"method": "GET", "url": "null", "body": None}
 
                 # 呼叫 get_profile
                 profile = line_bot_api.get_profile(user_id)
@@ -580,7 +425,7 @@ def callback():
 
                 # 把既有的待辦指令也回覆出來
                 print("待辦指令：",todo_command[user_id])
-                add(f"待辦指令：{todo_command[user_id]['command']}")
+                add(f"待辦指令：{todo_command[user_id]['url']}")
                 add(f"訊息內容：{user_text}")
 
                 # 直接使用 classify_tree 做分類
@@ -624,7 +469,8 @@ def callback():
                     continue
 
                 # 3) 執行指令（action）
-                action = (task_cfg.get("action") or {"type": "none"})
+                # action = (task_cfg.get("action") or {"type": "none"})
+                action = (task_cfg.get("action") or {})
                 # print(action['human_check'])
                 
                 # add(perform_action(action, values))
@@ -634,14 +480,19 @@ def callback():
                 # 順便暫存 payload
                 todo_command[user_id] = payload
 
-                if task_cfg.get("human_check") :
-                    add(f"處理程序：等待確認")
-                else :
-                    add(f"處理程序：直接執行")
-                    quote_path, raw = execute_simple_command(todo_command[user_id])
-                    add(f"下載連結：{quote_path}")
-                    todo_command[user_id] = {"command": "null","type":"none"}
+                if task_cfg.get("human_check"):
+                    add("處理程序：等待確認")
+                else:
+                    add("處理程序：直接執行")
+                    link, info, raw = execute_command(todo_command[user_id])
 
+                    # 重置待辦
+                    todo_command[user_id] = {"method": "GET", "url": "null", "body": None}
+
+                    if link:
+                        add(f"下載連結：{link}")
+                    if info:
+                        add(f"查詢結果：{info}")
 
                 # 回覆至line
                 reply_text(line_bot_api, event.reply_token, "\n".join(reply_lines))
