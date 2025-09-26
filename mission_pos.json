@@ -13,34 +13,6 @@
   },
 
   "tasks": {
-    "getexist_quote": {
-      "description": "產出報價單 PDF 並回傳下載連結",
-      "human_check": false,
-
-      "fields": {
-        "name":        { "prompt_key": "identify_name",     "required": true  , "match_pool":"customerlist.txt"}
-      },
-
-      "action": {
-        "type": "http",
-        "method": "GET",
-        "url_template": "https://cwsoft.leaflune.org/api/quote?name={name}",
-        "expect_json": true,
-        "link_key": "quote_path",
-        "link_base": "https://cwsoft.leaflune.org/",
-        "allow_unicode_url": true
-      },
-
-      "formatters": {
-        "tax_text":    { "from": "include_tax", "map": { "Y": "含稅", "N": "未稅", "null": "" } },
-        "start_text":  { "from": "start_month", "prefix": "從", "suffix": "月開始，", "skip_if_empty": true },
-        "months_text": { "from": "months", "prefix": "收費", "suffix": "個月", "skip_if_empty": true }
-      },
-
-      "reply_template": "你是想要[{name}]公司的{tax_text}報價單吧，{start_text}{months_text}{link_text}",
-      "error_template": "資訊不足，無法建立報價單。\n缺少：{missing_fields}\n請補充後再試。"
-    },
-
     "generate_quote": {
       "description": "產出報價單 PDF 並回傳下載連結",
       "human_check": false,
