@@ -5,10 +5,10 @@
   "classify_tree": {
     "prompt_key": "identify_needs",
     "branch": [
-      { "match": "getExistQuote", "task_id": "getexist_quote" },
-      { "match": "generateQuote", "task_id": "generate_quote" },
-      { "match": "paymentStatus", "task_id": "payment_status" },
-      { "match": "null",          "task_id": "fallback_greeting" }
+      { "match": "generateQuote",     "task_id": "generate_quote" },
+      { "match": "queryPoints",       "task_id": "query_points" },
+      { "match": "queryCredentials",  "task_id": "query_credentials" },
+      { "match": "null",              "task_id": "fallback_greeting" }
     ]
   },
 
@@ -18,10 +18,10 @@
       "human_check": false,
 
       "fields": {
-        "name":        { "prompt_key": "identify_name",     "required": true  , "match_pool":"customerlist.txt"},
-        "include_tax": { "prompt_key": "include_tax",       "required": false },
-        "start_month": { "prompt_key": "get_start_month",   "required": false },
-        "charge_months":      { "prompt_key": "get_charge_months", "required": false }
+        "name":           { "prompt_key": "identify_name",       "required": true,  "match_pool": "customerlist.txt" },
+        "include_tax":    { "prompt_key": "include_tax",         "required": false },
+        "start_month":    { "prompt_key": "get_start_month",     "required": false },
+        "charge_months":  { "prompt_key": "get_charge_months",   "required": false }
       },
 
       "action": {
@@ -35,27 +35,55 @@
       },
 
       "formatters": {
-        "tax_text":    { "from": "include_tax", "map": { "Y": "含稅", "N": "未稅", "null": "" } },
-        "start_text":  { "from": "start_month", "prefix": "從", "suffix": "月開始，", "skip_if_empty": true },
-        "months_text": { "from": "charge_months", "prefix": "收費", "suffix": "個月", "skip_if_empty": true }
+        "tax_text":    { "from": "include_tax",   "map": { "Y": "含稅", "N": "未稅", "null": "" } },
+        "start_text":  { "from": "start_month",   "prefix": "從", "suffix": "月開始，", "skip_if_empty": true },
+        "months_text": { "from": "charge_months", "prefix": "收費", "suffix": "個月",   "skip_if_empty": true }
       },
 
       "reply_template": "你是想要[{name}]公司的{tax_text}報價單吧，{start_text}{months_text}{link_text}",
       "error_template": "資訊不足，無法建立報價單。\n缺少：{missing_fields}\n請補充後再試。"
     },
 
-    "payment_status": {
-      "description": "詢問付費狀況（示意：先不連資料源）",
+    "query_points": {
+      "description": "查詢指定公司目前點數並回覆數值",
       "human_check": false,
 
       "fields": {
-        "name": { "prompt_key": "identify_name", "required": true }
+        "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
       },
 
-      "action": { "type": "none" },
+      "action": {
+        "type": "http",
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/points?name={name}",
+        "expect_json": true,
+        "value_key": "points", 
+        "allow_unicode_url": true
+      },
 
-      "reply_template": "你是想詢問關於[{name}]的相關資訊吧",
-      "error_template": "資訊不足，無法查詢付費狀況。\n缺少：{missing_fields}"
+      "reply_template": "[{name}] 目前的點數是：{value_text}",
+      "error_template": "查詢 [{name}] 點數時發生問題，請稍後再試。"
+    },
+
+    "query_credentials": {
+      "description": "查詢指定公司的登入帳號與密碼並回覆",
+      "human_check": false,
+
+      "fields": {
+        "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
+      },
+
+      "action": {
+        "type": "http",
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/credentials?name={name}",
+        "expect_json": true,
+        "value_key": "credentials",
+        "allow_unicode_url": true
+      },
+
+      "reply_template": "[{name}] 的帳密如下：\n{value_text}",
+      "error_template": "查詢 [{name}] 帳密時發生問題，請稍後再試。"
     },
 
     "fallback_greeting": {
