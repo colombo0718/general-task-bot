@@ -70,6 +70,7 @@ LLM_MODEL = "llama-3.3-70b-versatile"  # Mistral MoE 模型
 
 # ===== 載入 prompts.ini =====
 cfg = configparser.RawConfigParser()  # Raw 避免 % 插值
+cfg.read("prompts_system.ini", encoding="utf-8") 
 cfg.read(PROMPTS_FILE, encoding="utf-8") 
 extractors = dict(cfg.items("extractors"))
 
@@ -327,25 +328,24 @@ def build_command(action: dict, values: dict):
         body = leftover if leftover else None
 
     # cmd_text 給你印在回覆裡看，payload 給下一步執行
-    return final_url, {"method": method, "url": final_url, "body": body}
+    # return final_url, {"method": method, "url": final_url, "body": body}
+    return final_url, {"url": final_url}
 
 
-def execute_command(payload: dict, timeout: float = 10.0):
+def execute_command(method: str, url: str, user_id: str, timeout: float = 10.0):
     """
-    執行 HTTP API 指令：
-    - payload: {"method": "GET/POST...", "url": "...", "body": dict|None}
-    - 預期 API 回傳格式: {"ok": true/false, "info": ..., "link": ...}
-    回傳: (link, info, raw_json_or_text)
+    執行 HTTP API 指令（user_id 一律以 query 帶上，無 body）：
+    - method: "GET" / "POST"（GET=預覽/查詢；POST=實際改動）
+    - url:    API URL（不含 user_id）
+    - user_id: 會自動附加為 ?user_id=xxx 或 &user_id=xxx
+    回傳: (link, info, raw_json_or_text)；期望伺服器回 {"ok":..., "info":..., "link":...}
     """
-    method = (payload.get("method") or "GET").upper()
-    url    = payload.get("url") or ""
-    body   = payload.get("body")
+    # 將 user_id 加到 query
+    sep = "&" if "?" in url else "?"
+    final_url = f"{url}{sep}user_id={user_id}"
 
     try:
-        if method == "GET":
-            resp = requests.get(url, timeout=timeout)
-        else:
-            resp = requests.request(method, url, json=body, timeout=timeout)
+        resp = requests.request(method.upper(), final_url, timeout=timeout)
         resp.raise_for_status()
 
         ctype = (resp.headers.get("Content-Type") or "").lower()
@@ -356,27 +356,22 @@ def execute_command(payload: dict, timeout: float = 10.0):
             link = data.get("link")
             info = data.get("info")
 
-            # 若 ok=False 且沒有 info/link，就把 error 當 info 回傳
             if not ok and info is None and link is None:
                 info = data.get("error")
 
-            # 統一把 dict/list 轉字串（方便模板使用）
             if isinstance(info, (dict, list)):
                 info = json.dumps(info, ensure_ascii=False)
 
             return link, info, data
 
-        # 如果不是 JSON，就直接當 info 處理
         return None, str(data), data
 
     except Exception as e:
         return None, None, {"ok": False, "error": str(e)}
 
-
-
 # ===== 暫存每位使用者的既有指令 =====
 todo_command = {}  
-# 結構: { user_id: {"method": "GET/POST...", "url": "<final_url>", "body": dict|None} }
+# 結構: { user_id: {"url": "<api_url>", "human_check": "true"|"false"|"auto"} }
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -397,8 +392,6 @@ def callback():
                 user_text = event.message.text.strip()
                 print("message",user_text)
 
-                reply_message='測試'
-
                 # 逐段疊加回覆
                 reply_lines = []
                 def add(line: str):
@@ -408,7 +401,7 @@ def callback():
                 user_id = event.source.user_id
 
                 if user_id not in todo_command:
-                    todo_command[user_id] = {"method": "GET", "url": "null", "body": None}
+                    todo_command[user_id] = {"url": "null", "human_check": False}
 
                 # 呼叫 get_profile
                 profile = line_bot_api.get_profile(user_id)
@@ -428,10 +421,34 @@ def callback():
                 add(f"待辦指令：{todo_command[user_id]['url']}")
                 add(f"訊息內容：{user_text}")
 
+                human_check=todo_command[user_id]['human_check']
+                extracted_ronot=run_extractor('extracted_ronot', user_text)
+                print("extracted_ronot :",extracted_ronot)
+
+                if extracted_ronot=="true" or  (extracted_ronot=="null" and human_check=='auto'):
+                    add(f"待辦處理：確認執行")
+                    link, info, raw = execute_command("POST",todo_command[user_id]['url'],user_id)
+                    # print(link)
+                    todo_command[user_id] = {"url": "null", "human_check": False}
+                    if link:
+                        add(f"下載連結：{link}")
+                    if info:
+                        add(f"執行結果：{info}")
+                
+                elif extracted_ronot=="false" or  (extracted_ronot=="null" and human_check=='true'):
+                    add(f"待辦處理：取消待辦")
+                    todo_command[user_id] = {"url": "null", "human_check": False}
+                    
+                
+                if not extracted_ronot=="null":
+                    reply_text(line_bot_api, event.reply_token, "\n".join(reply_lines))
+                    return "OK",200
+
                 # 直接使用 classify_tree 做分類
                 # 目前只能做單層分類
                 classify_tree = mission_data["classify_tree"]
                 extracted_result = run_extractor(classify_tree["prompt_key"], user_text)
+                print('extracted_result :',extracted_result)
 
                 selected_task_id = None
                 fallback_task_id = None
@@ -475,24 +492,33 @@ def callback():
                 
                 # add(perform_action(action, values))
 
-                cmd_text, payload = build_command(action, values)
-                add(f"構築指令：{cmd_text}")
-                # 順便暫存 payload
-                todo_command[user_id] = payload
+                cmd_url, payload = build_command(action, values)
+                add(f"構築指令：{cmd_url}")
 
-                if task_cfg.get("human_check"):
-                    add("處理程序：等待確認")
-                else:
+                human_check=task_cfg.get("human_check").strip().lower()
+                print(human_check)
+
+                if human_check=='true':
+                    add("處理程序：等待確認，預設取消")
+                    todo_command[user_id] = {"url": cmd_url, "human_check":'true'}
+
+                elif human_check=='false': 
                     add("處理程序：直接執行")
-                    link, info, raw = execute_command(todo_command[user_id])
+                    # link, info, raw = execute_command("GET",cmd_url,user_id)
+                    # if link:
+                    #     add(f"下載連結：{link}")
+                    # if info:
+                    #     add(f"查詢結果：{info}")
+                elif human_check=='auto':
+                    add("處理程序：等待確認，預設執行")
+                    todo_command[user_id] = {"url": cmd_url, "human_check":'auto'}
 
-                    # 重置待辦
-                    todo_command[user_id] = {"method": "GET", "url": "null", "body": None}
-
-                    if link:
-                        add(f"下載連結：{link}")
-                    if info:
-                        add(f"查詢結果：{info}")
+                link, info, raw = execute_command("GET",cmd_url,user_id)
+                if link:
+                    add(f"下載連結：{link}")
+                if info:
+                    add(f"查詢結果：{info}")
+                
 
                 # 回覆至line
                 reply_text(line_bot_api, event.reply_token, "\n".join(reply_lines))

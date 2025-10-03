@@ -8,6 +8,7 @@
       { "match": "generateQuote",     "task_id": "generate_quote" },
       { "match": "queryPoints",       "task_id": "query_points" },
       { "match": "queryCredentials",  "task_id": "query_credentials" },
+      { "match": "addPoints",         "task_id": "add_points" },
       { "match": "null",              "task_id": "fallback_greeting" }
     ]
   },
@@ -15,7 +16,7 @@
   "tasks": {
     "generate_quote": {
       "description": "產出報價單 PDF 並回傳下載連結",
-      "human_check": false,
+      "human_check": "false",
 
       "fields": {
         "name":           { "prompt_key": "identify_name",       "required": true,  "match_pool": "customerlist.txt" },
@@ -25,73 +26,58 @@
       },
 
       "action": {
-        "type": "http",
         "method": "GET",
-        "url_template": "https://cwsoft.leaflune.org/api/quote?name={name}&charge_months={charge_months}&price_includes_tax={include_tax}",
-        "expect_json": true,
-        "link_key": "quote_path",
-        "link_base": "https://cwsoft.leaflune.org/",
-        "allow_unicode_url": true
-      },
-
-      "formatters": {
-        "tax_text":    { "from": "include_tax",   "map": { "Y": "含稅", "N": "未稅", "null": "" } },
-        "start_text":  { "from": "start_month",   "prefix": "從", "suffix": "月開始，", "skip_if_empty": true },
-        "months_text": { "from": "charge_months", "prefix": "收費", "suffix": "個月",   "skip_if_empty": true }
-      },
-
-      "reply_template": "你是想要[{name}]公司的{tax_text}報價單吧，{start_text}{months_text}{link_text}",
-      "error_template": "資訊不足，無法建立報價單。\n缺少：{missing_fields}\n請補充後再試。"
+        "url_template": "https://cwsoft.leaflune.org/api/quote?name={name}&charge_months={charge_months}&price_includes_tax={include_tax}"
+      }
     },
 
     "query_points": {
       "description": "查詢指定公司目前點數並回覆數值",
-      "human_check": false,
+      "human_check": "false",
 
       "fields": {
         "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
       },
-
       "action": {
-        "type": "http",
         "method": "GET",
-        "url_template": "https://cwsoft.leaflune.org/sqlgate/points?name={name}",
-        "expect_json": true,
-        "value_key": "points", 
-        "allow_unicode_url": true
-      },
-
-      "reply_template": "[{name}] 目前的點數是：{value_text}",
-      "error_template": "查詢 [{name}] 點數時發生問題，請稍後再試。"
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/points?name={name}"
+      }
     },
 
     "query_credentials": {
       "description": "查詢指定公司的登入帳號與密碼並回覆",
-      "human_check": false,
+      "human_check": "false",
 
       "fields": {
         "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
       },
 
       "action": {
-        "type": "http",
         "method": "GET",
-        "url_template": "https://cwsoft.leaflune.org/sqlgate/credentials?name={name}",
-        "expect_json": true,
-        "value_key": "credentials",
-        "allow_unicode_url": true
-      },
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/credentials?name={name}"
+      }
+    },
 
-      "reply_template": "[{name}] 的帳密如下：\n{value_text}",
-      "error_template": "查詢 [{name}] 帳密時發生問題，請稍後再試。"
+    "add_points": {
+      "description": "加點數（需確認）",
+      "human_check": "true",
+      "fields": {
+        "name":  { "prompt_key": "identify_name",  "required": true,  "match_pool": "customerlist.txt" },
+        "delta": { "prompt_key": "get_delta_point",      "required": true }
+      },
+      "action": {
+        "method": "GET",
+        "confirm_method": "POST",
+        "confirm_body_keys": ["name", "delta"],
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/add_points?name={name}&delta={delta}"
+      }
     },
 
     "fallback_greeting": {
       "description": "分類失敗時的友善提示",
-      "human_check": false,
+      "human_check": "false",
       "fields": {},
-      "action": { "type": "none" },
-      "reply_template": "我全葳實習小幫手，有甚麼我可以幫到你的嗎"
+      "action": { "method": "GET", "url_template": "https://cwsoft.leaflune.org/ping" }
     }
   }
 }
