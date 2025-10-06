@@ -11,23 +11,20 @@
   "tasks": {
     "record_expense": {
       "description": "記錄一筆花銷流水",
-      "human_check": false,
+      "human_check": "false",
       "fields": {
         "item": { "prompt_key": "get_item", "required": true },
         "price":{ "prompt_key": "get_price","required": true },
         "date": { "prompt_key": "get_date", "required": false, "reference":true}
       },
       "action": {
-        "type": "sql",
-        "template": "INSERT INTO expenses (item, price, date) VALUES ({item}, {price}, {date})",
-        "style": "qmark"
       },
       "reply_template": "已記錄：{item} {price} 元 {note}",
       "error_template": "無法記錄，缺少：{missing_fields}"
     },
     "fallback_greeting": {
       "description": "分類失敗時的提示",
-      "human_check": false,
+      "human_check": "false",
       "fields": {},
       "action": { "type": "none" },
       "reply_template": "我可以幫你記帳喔！例如輸入：午餐 120"
