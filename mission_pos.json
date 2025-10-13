@@ -7,8 +7,15 @@
     "branch": [
       { "match": "generateQuote",     "task_id": "generate_quote" },
       { "match": "queryPoints",       "task_id": "query_points" },
+      { "match": "adjustPoints",      "task_id": "adjust_points" },
+      { "match": "querySmsPoints",    "task_id": "query_sms_points" },
+      { "match": "adjustSmsPoints",   "task_id": "adjust_sms_points" },
       { "match": "queryCredentials",  "task_id": "query_credentials" },
-      { "match": "addPoints",         "task_id": "add_points" },
+      { "match": "companyName",       "task_id": "company_name" },
+      { "match": "RegionCustomers",   "task_id": "region_customers" },   
+      { "match": "getIntransit",      "task_id": "get_intransit_feature" },
+      { "match": "setIntransit",      "task_id": "set_intransit_feature" },
+      { "match": "restoreTestDB",     "task_id": "restore_test_db" },
       { "match": "null",              "task_id": "fallback_greeting" }
     ]
   },
@@ -40,7 +47,53 @@
       },
       "action": {
         "method": "GET",
-        "url_template": "https://cwsoft.leaflune.org/sqlgate/points?name={name}"
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/query_points?name={name}"
+      }
+    },
+
+    
+    "adjust_points": {
+      "description": "加點數（需確認）",
+      "human_check": "true",
+      "fields": {
+        "name":  { "prompt_key": "identify_name",  "required": true,  "match_pool": "customerlist.txt" },
+        "delta": { "prompt_key": "get_delta_amount",      "required": true }
+      },
+      "action": {
+        "method": "GET",
+        "confirm_method": "POST",
+        "confirm_body_keys": ["name", "delta"],
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/adjust_points?name={name}&delta={delta}"
+      }
+    },
+
+    "query_sms_points": {
+      "description": "查詢指定公司目前簡訊點數並回覆數值",
+      "human_check": "false",
+
+      "fields": {
+        "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
+      },
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/query_sms_points?name={name}"
+      }
+    },
+
+
+    "adjust_sms_points": {
+      "description": "依金額加簡訊點數（需確認）",
+      "human_check": "true",
+
+      "fields": {
+        "name":   { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" },
+        "amount": { "prompt_key": "get_delta_amount",    "required": true }
+      },
+      "action": {
+        "method": "GET",
+        "confirm_method": "POST",
+        "confirm_body_keys": ["name", "amount"],
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/adjust_sms_points?name={name}&amount={amount}"
       }
     },
 
@@ -58,18 +111,80 @@
       }
     },
 
-    "add_points": {
-      "description": "加點數（需確認）",
-      "human_check": "true",
+
+    "company_name": {
+      "description": "查詢指定公司的公司名稱並回覆",
+      "human_check": "false",
+
       "fields": {
-        "name":  { "prompt_key": "identify_name",  "required": true,  "match_pool": "customerlist.txt" },
-        "delta": { "prompt_key": "get_delta_point",      "required": true }
+        "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
       },
+
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/company_name?name={name}"
+      }
+    },
+
+    "region_customers": {
+      "description": "查詢指定地區有哪些客戶（依市話區碼開頭碼查詢公司名稱）",
+      "human_check": "false",
+
+      "fields": {
+        "region_code": { "prompt_key": "get_region", "required": true }
+      },
+
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/region_customers?region_code={region_code}"
+      }
+    },
+
+    "get_intransit_feature": {
+      "description": "查詢指定公司『在途庫存』功能是否開啟",
+      "human_check": "false",
+
+      "fields": {
+        "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
+      },
+
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/intransit_feature?name={name}"
+      }
+    },
+
+    "set_intransit_feature": {
+      "description": "設定指定公司『在途庫存』功能（0=關，1=開）",
+      "human_check": "true",
+
+      "fields": {
+        "name":  { "prompt_key": "identify_name",        "required": true,  "match_pool": "customerlist.txt" },
+        "value": { "prompt_key": "get_boolean_switch",   "required": true }  
+      },
+
       "action": {
         "method": "GET",
         "confirm_method": "POST",
-        "confirm_body_keys": ["name", "delta"],
-        "url_template": "https://cwsoft.leaflune.org/sqlgate/add_points?name={name}&delta={delta}"
+        "confirm_body_keys": ["name", "value"],
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/set_intransit_feature?name={name}&value={value}"
+      }
+    },
+
+    "restore_test_db": {
+      "description": "將指定公司的『測試資料庫』還原到指定時間點（高風險動作，需確認）",
+      "human_check": "true",
+
+      "fields": {
+        "name":         { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" },
+        "restore_time": { "prompt_key": "get_datetime",  "required": true } 
+      },
+
+      "action": {
+        "method": "GET",
+        "confirm_method": "POST",
+        "confirm_body_keys": ["name", "restore_time"],
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/restore_test_db?name={name}&restore_time={restore_time}"
       }
     },
 
