@@ -16,6 +16,9 @@
       { "match": "getIntransit",      "task_id": "get_intransit_feature" },
       { "match": "setIntransit",      "task_id": "set_intransit_feature" },
       { "match": "restoreTestDB",     "task_id": "restore_test_db" },
+      { "match": "rebuildInventory",  "task_id": "rebuild_inventory" },
+      { "match": "addDevice",         "task_id": "add_device" },
+      { "match": "detachCustomer",    "task_id": "detach_customer" },
       { "match": "null",              "task_id": "fallback_greeting" }
     ]
   },
@@ -177,7 +180,7 @@
 
       "fields": {
         "name":         { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" },
-        "restore_time": { "prompt_key": "get_datetime",  "required": true } 
+        "restore_time": { "prompt_key": "get_datetime",  "required": true, "reference": true } 
       },
 
       "action": {
@@ -185,6 +188,36 @@
         "confirm_method": "POST",
         "confirm_body_keys": ["name", "restore_time"],
         "url_template": "https://cwsoft.leaflune.org/sqlgate/restore_test_db?name={name}&restore_time={restore_time}"
+      }
+    },
+
+    "rebuild_inventory": {
+      "description": "執行指定公司『即時庫存重整』",
+      "human_check": "true",
+      "fields": {
+        "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
+      },
+      "action": {
+        "method": "GET",
+        "confirm_method": "POST",
+        "confirm_body_keys": ["name"],
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/rebuild_inventory?name={name}"
+      }
+    },
+    
+    "detach_customer": {
+      "description": "下架客戶（自動推斷區碼，需確認）",
+      "human_check": "true",
+
+      "fields": {
+        "name": { "prompt_key": "identify_name", "required": true, "match_pool": "customerlist.txt" }
+      },
+
+      "action": {
+        "method": "GET",
+        "confirm_method": "POST",
+        "confirm_body_keys": ["name"],
+        "url_template": "https://cwsoft.leaflune.org/sqlgate/detach_customer?name={name}"
       }
     },
 
