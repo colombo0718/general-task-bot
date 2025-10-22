@@ -284,6 +284,7 @@ def gather_fields(task_id: str, mission_data: dict, user_text: str):
                 best = extract_best_matching_name(values[field_name], candidates, threshold=0.8)
                 if best and best.lower() != "null":
                     values[field_name] = best
+            print("new ",field_name,values[field_name])
         # === 新增結束 ===
 
 
