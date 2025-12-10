@@ -6,6 +6,7 @@
     "prompt_key": "identify_needs",
     "branch": [
       { "match": "generateQuote",     "task_id": "generate_quote" },
+      { "match": "generatePerip",     "task_id": "generate_perip" },
       { "match": "queryPoints",       "task_id": "query_points" },
       { "match": "adjustPoints",      "task_id": "adjust_points" },
       { "match": "querySmsPoints",    "task_id": "query_sms_points" },
@@ -22,6 +23,7 @@
       { "match": "exportOffShelf",    "task_id": "export_off_shelf" },
       { "match": "addCustomer",       "task_id": "add_customer" },
       { "match": "detachCustomer",    "task_id": "detach_customer" },
+      { "match": "refreshCompanies",  "task_id": "refresh_companies" },
       { "match": "null",              "task_id": "fallback_greeting" }
     ]
   },
@@ -34,15 +36,37 @@
       "fields": {
         "name":           { "prompt_key": "identify_name",       "required": true,  "match_pool": "customerlist.txt" },
         "include_tax":    { "prompt_key": "include_tax",         "required": false },
-        "start_month":    { "prompt_key": "get_start_month",     "required": false },
+        "due_month":     { "prompt_key": "start_to_due_month", "required": false, "reference": true },
         "charge_months":  { "prompt_key": "get_charge_months",   "required": false }
       },
 
       "action": {
         "method": "GET",
-        "url_template": "https://cwsoft.leaflune.org/api/quote?name={name}&charge_months={charge_months}&price_includes_tax={include_tax}"
+        "url_template": "https://cwsoft.leaflune.org/api/quote?name={name}&charge_months={charge_months}&price_includes_tax={include_tax}&due_month={due_month}"
       }
     },
+
+
+    "generate_perip": {
+      "description": "產出周邊商品報價單 PDF（紙捲／碳帶／條碼機）並回傳下載連結",
+      "human_check": "false",
+
+      "fields": {
+        "name":        { "prompt_key": "identify_name",      "required": true,  "match_pool": "customerlist.txt" },
+
+        "include_tax": { "prompt_key": "include_tax",        "required": false },
+
+        "paper":       { "prompt_key": "get_paper_qty",      "required": false },
+        "carbon":      { "prompt_key": "get_carbon_qty",     "required": false },
+        "machine":     { "prompt_key": "get_machine_qty",    "required": false }
+      },
+
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/api/perip?name={name}&paper={paper}&carbon={carbon}&machine={machine}&price_includes_tax={include_tax}&month={month}"
+      }
+    },
+
 
     "query_points": {
       "description": "查詢指定公司目前點數並回覆數值",
@@ -292,6 +316,19 @@
       "action": {
         "method": "POST",
         "url_template": "https://cwsoft.leaflune.org/sqlgate/export_off_shelf?name={name}&start_date={start_date}&end_date={end_date}&branch_code={branch_code}"
+      }
+    },
+    
+    "refresh_companies": {
+      "description": "重新計算每一家公司的收費資料並更新 companies_payment_data.json",
+      "human_check": "false",
+
+      "fields": {
+      },
+
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/api/refresh_companies"
       }
     },
 

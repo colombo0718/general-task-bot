@@ -14,6 +14,8 @@ import configparser
 import json
 from datetime import datetime
 
+import subprocess
+
 # ===== 檔案設定 =====
 # # ----- 記帳小幫手 -----
 # PROMPTS_FILE = "prompts.ini"
@@ -381,6 +383,7 @@ def callback():
 
     try:
         events = parser.parse(body, signature)
+        print("signature:",signature)
     except InvalidSignatureError:
         abort(400)
 
@@ -391,6 +394,11 @@ def callback():
             # 只處理文字訊息
             if getattr(event, "message", None) and getattr(event.message, "text", None):
                 user_text = event.message.text.strip()
+
+                # 強插更新客戶列表的小程式，之後想辦法拿掉
+                subprocess.run([sys.executable, "generate_customerlist_simple.py"], check=True)
+                # print("run generate_customerlist_simple")
+
                 print("message",user_text)
 
                 # 逐段疊加回覆
