@@ -407,6 +407,7 @@ def callback():
                     if line:
                         reply_lines.append(line)
 
+                print(event.source)
                 user_id = event.source.user_id
 
                 if user_id not in todo_command:
