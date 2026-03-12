@@ -1,0 +1,33 @@
+{
+  "version": 3,
+  "locale": "zh-TW",
+
+  "classify_tree": {
+    "prompt_key": "identify_needs",
+    "branch": [
+      { "match": "storeBranchGuide", "task_id": "store_branch_guide" },
+      { "match": "null",            "task_id": "fallback_greeting" }
+    ]
+  },
+
+  "tasks": {
+    "store_branch_guide": {
+      "description": "門市導覽：查詢門市/分店列表並回傳結果",
+      "human_check": "false",
+
+      "fields": {},
+
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/bind/branches?name=星威"
+      }
+    },
+
+    "fallback_greeting": {
+      "description": "分類失敗時的友善提示",
+      "human_check": "false",
+      "fields": {},
+      "action": { "method": "GET", "url_template": "https://cwsoft.leaflune.org/ping" }
+    }
+  }
+}

@@ -1,5 +1,5 @@
 from flask import Flask, request, abort
-from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
+from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage, FlexMessage
 from linebot.v3.webhook import WebhookParser
 from linebot.v3.exceptions import InvalidSignatureError
 from dotenv import load_dotenv
@@ -13,9 +13,9 @@ import urllib.parse
 import configparser
 import json
 from datetime import datetime
-
+# from linebot.v3.messaging import ReplyMessageRequest, FlexMessage
 import subprocess
-
+from todo_list import init_todo_db, insert_todo_item,view_todo_list
 # ===== 檔案設定 =====
 # # ----- 記帳小幫手 -----
 # PROMPTS_FILE = "prompts.ini"
@@ -43,6 +43,27 @@ def _resolve_config_pair():
 
 PROMPTS_FILE, MISSION_FILE = _resolve_config_pair()
 
+def _resolve_port(default_port: int = 6000) -> int:
+    # 1️⃣ 環境變數優先
+    env_port = os.getenv("PORT")
+    if env_port and env_port.isdigit():
+        port = int(env_port)
+        if 1 <= port <= 65535:
+            return port
+
+    # 2️⃣ argv
+    if len(sys.argv) >= 3:
+        raw = sys.argv[2]
+        if raw.isdigit():
+            port = int(raw)
+            if 1 <= port <= 65535:
+                return port
+
+    # 3️⃣ default
+    return default_port
+
+SERVICE_PORT = _resolve_port()
+
 print(f"[BOOT] Using config files -> PROMPTS_FILE={PROMPTS_FILE}, MISSION_FILE={MISSION_FILE}")
 if not os.path.exists(PROMPTS_FILE):
     raise FileNotFoundError(f"找不到 {PROMPTS_FILE}（請確認檔名或參數是否正確）")
@@ -66,8 +87,9 @@ LLM_MODEL = "openai/gpt-oss-20b"              # 開源 GPT-OSS
 # LLM_MODEL = "Cohere/command-r-plus"           # Cohere Command-R+
 # LLM_MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"  # Mistral MoE 模型
 # LLM_MODEL = "groq/compound"  # Mistral MoE 模型
-LLM_MODEL = "llama-3.1-8b-instant"  # Mistral MoE 模型
+LLM_MODEL = "llama-3.1-8b-instant"  # Mistral MoE 模型/
 LLM_MODEL = "llama-3.3-70b-versatile"  # Mistral MoE 模型
+# LLM_MODEL = "whisper-large-v3"
 
 
 # ===== 載入 prompts.ini =====
@@ -84,20 +106,34 @@ app = Flask(__name__)
 
 
 # 讀環境變數
-load_dotenv()
+# load_dotenv()
 
-channel_secret = os.environ["LINE_CHANNEL_SECRET"]
-channel_access_token = os.environ["LINE_CHANNEL_TOKEN"]
+# channel_secret = os.environ["LINE_CHANNEL_SECRET"]
+# channel_access_token = os.environ["LINE_CHANNEL_TOKEN"]
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+# 檢查待辦資料庫
+init_todo_db()  # 每次啟動都跑一次，確保 todo_list.db 與 todo_items 表存在
+
 # ===== Line OA 設定（可改用環境變數）=====
 # channel_secret = "18bff72eac223d45b1e554d345d24e57"
 # channel_access_token = "iN87wB2MJl/y7E45zi24vjbbQpEkXOBTce/B/3HCWkiJnIqLpJYjK4X9XDGhMGUtf7ml77JjTxUHk/H2uFdPrCpjhKF0iP9zLL5ssDDyU7Eyik338Zp6Lhn0PZG0hAsdSFwtEtStoybKO+0ats2nlgdB04t89/1O/w1cDnyilFU="
-configuration = Configuration(access_token=channel_access_token)
-parser = WebhookParser(channel_secret)
+OA_REGISTRY_PATH = "oa_registry.json"  # 你想寫死在主程式就寫死
+
+with open(OA_REGISTRY_PATH, "r", encoding="utf-8") as f:
+    OA_REGISTRY = json.load(f)
+
+def get_oa_secret_token(oaid: str):
+    cfg = OA_REGISTRY.get(oaid)
+    if not cfg:
+        return None, None
+    return cfg["channel_secret"], cfg["channel_access_token"]
+
+# configuration = Configuration(access_token=channel_access_token)
+# parser = WebhookParser(channel_secret)
 
 # ====== Hugging Face ======
 client = InferenceClient(api_key=HF_TOKEN)
@@ -372,14 +408,113 @@ def execute_command(method: str, url: str, user_id: str, timeout: float = 10.0):
     except Exception as e:
         return None, None, {"ok": False, "error": str(e)}
 
+
+
+def maps_url_by_address(addr: str) -> str:
+    q = urllib.parse.quote((addr or "").strip())
+    return f"https://www.google.com/maps/search/?api=1&query={q}"
+
+def is_valid_address(addr: str) -> bool:
+    a = (addr or "").strip()
+    if not a:
+        return False
+    if a in ("開發資料庫", "1", "null", "NULL"):
+        return False
+    return True
+
+def build_branches_flex(raw: dict) -> dict:
+    """
+    raw = execute_command 回傳的 dict
+    期待 raw["items"] 或 raw["info"] 是分店清單
+    """
+    if not isinstance(raw, dict) or not raw.get("ok"):
+        raise ValueError("branches API 回傳格式不正確或 ok=false")
+
+    items = raw.get("items") or raw.get("info") or []
+    if not isinstance(items, list) or not items:
+        raise ValueError("branches API 找不到 items/info")
+
+    bubbles = []
+    for it in items:
+        name = (it.get("store_name") or "未命名分店").strip()
+        addr = (it.get("address") or "").strip()
+        code = it.get("branch_code", "")
+
+        # footer 按鈕：地址不合法就改成「無地址」
+        if is_valid_address(addr):
+            footer_button = {
+                "type": "button",
+                "style": "primary",
+                "action": {
+                    "type": "uri",
+                    "label": "📍 開啟地圖",
+                    "uri": maps_url_by_address(addr)
+                }
+            }
+            addr_text = addr
+        else:
+            footer_button = {
+                "type": "button",
+                "style": "secondary",
+                "action": {
+                    "type": "message",
+                    "label": "⚠️ 無有效地址",
+                    "text": f"{name} 目前未設定有效地址"
+                }
+            }
+            addr_text = "（未提供有效地址）"
+
+        bubbles.append({
+            "type": "bubble",
+            "size": "kilo",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {"type": "text", "text": name, "weight": "bold", "size": "lg", "wrap": True},
+                    {"type": "text", "text": f"分店代碼：{code}", "size": "sm", "color": "#666666", "wrap": True},
+                    {"type": "text", "text": addr_text, "size": "sm", "wrap": True}
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [footer_button]
+            }
+        })
+
+    # LINE carousel 建議不要太多；先限制 10
+    return {"type": "carousel", "contents": bubbles[:10]}
+
+def reply_flex(line_bot_api: MessagingApi, reply_token: str, alt_text: str, contents: dict):
+    msg = FlexMessage(alt_text=alt_text, contents=contents)
+    print(contents)
+    print(msg)
+    line_bot_api.reply_message(
+        ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[msg]
+        )
+    )
+
+
 # ===== 暫存每位使用者的既有指令 =====
 todo_command = {}  
 # 結構: { user_id: {"url": "<api_url>", "human_check": "true"|"false"|"auto"} }
 
-@app.route("/callback", methods=['POST'])
-def callback():
+@app.route("/callback/<oaid>", methods=['POST'])
+def callback(oaid):
     signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
+
+    channel_secret, channel_access_token = get_oa_secret_token(oaid)
+    if not channel_secret:
+        abort(404)
+
+    parser = WebhookParser(channel_secret)
+    configuration = Configuration(access_token=channel_access_token)
 
     try:
         events = parser.parse(body, signature)
@@ -399,6 +534,7 @@ def callback():
                 subprocess.run([sys.executable, "generate_customerlist_simple.py"], check=True)
                 # print("run generate_customerlist_simple")
 
+                print("oaid:",oaid)
                 print("message",user_text)
 
                 # 逐段疊加回覆
@@ -411,7 +547,7 @@ def callback():
                 user_id = event.source.user_id
 
                 if user_id not in todo_command:
-                    todo_command[user_id] = {"url": "null", "human_check": False}
+                    todo_command[user_id] = {"url": "null", "human_check": False,"run_at":"now","user_text":""}
 
                 # 呼叫 get_profile
                 profile = line_bot_api.get_profile(user_id)
@@ -422,13 +558,13 @@ def callback():
 
                 # print("使用者 UID:", user_id)
                 print("使用者名稱:", display_name)
-                print("使用者 UID:", user_id)
+                print("使用者 UID:", user_id) 
                 # print(status_msg)
                 add(f"用戶身分：{display_name}<{user_id}>")
 
                 # 把既有的待辦指令也回覆出來
-                print("待辦指令：",todo_command[user_id])
-                add(f"待辦指令：{todo_command[user_id]['url']}")
+                print("待定指令：",todo_command[user_id]['url'])
+                add(f"待定指令：{todo_command[user_id]['run_at']} 執行 {todo_command[user_id]['url']}")
                 add(f"訊息內容：{user_text}")
 
                 human_check=todo_command[user_id]['human_check']
@@ -437,22 +573,52 @@ def callback():
 
                 if extracted_ronot=="true" or  (extracted_ronot=="null" and human_check=='auto'):
                     add(f"待辦處理：確認執行")
-                    link, info, raw = execute_command("POST",todo_command[user_id]['url'],user_id)
-                    # print(link)
-                    todo_command[user_id] = {"url": "null", "human_check": False}
-                    if link:
-                        add(f"下載連結：{link}")
-                    if info:
-                        add(f"執行結果：{info}")
-                
+                    if todo_command[user_id]['run_at']=="now" :
+                        link, info, raw = execute_command("POST",todo_command[user_id]['url'],user_id)
+                        # print(link)
+                        if link:
+                            add(f"下載連結：{link}")
+                        if info:
+                            add(f"執行結果：{info}")
+                    else :
+                        # add(f"納入排程：")
+                        todo_id = insert_todo_item(user_id, todo_command[user_id]['run_at'],todo_command[user_id]['url'], todo_command[user_id]['user_text'])
+                        add(f"建立排程：#{todo_id} 將於 {todo_command[user_id]['run_at']} 執行 {todo_command[user_id]['url']}")
+                    todo_command[user_id] = {"url": "null", "human_check": False,"run_at":"now","user_text":""}
                 elif extracted_ronot=="false" or  (extracted_ronot=="null" and human_check=='true'):
-                    add(f"待辦處理：取消待辦")
-                    todo_command[user_id] = {"url": "null", "human_check": False}
+                    add(f"待辦處理：取消執行")
+                    todo_command[user_id] = {"url": "null", "human_check": False,"run_at":"now","user_text":""} 
                     
-                
+                # 訊息為確認或取消之前的指令，則不須繼續
                 if not extracted_ronot=="null":
                     reply_text(line_bot_api, event.reply_token, "\n".join(reply_lines))
                     return "OK",200
+                
+
+                view_todos = run_extractor("extract_view_todos", user_text)
+
+                if view_todos == "true":
+                    rows = view_todo_list(user_id)
+                    add("待辦清單：")
+                    if not rows:
+                        add("（目前沒有待辦）")
+                    else:
+                        for _id, txt in rows:
+                            add(f"#{_id} {txt}")
+
+                    reply_text(line_bot_api, event.reply_token, "\n".join(reply_lines))
+                    return "OK", 200
+                
+                # 判斷是否延後執行
+                run_at = run_extractor('extract_run_at', user_text,reference_content)
+                print("run_at:",run_at)
+                if run_at != "null":
+                    add(f"執行時間：{run_at}")
+                else:    
+                    add(f"執行時間：now")
+                    run_at='now'
+                    
+
 
                 # 直接使用 classify_tree 做分類
                 # 目前只能做單層分類
@@ -510,20 +676,92 @@ def callback():
 
                 if human_check=='true':
                     add("處理程序：等待確認，預設取消")
-                    todo_command[user_id] = {"url": cmd_url, "human_check":'true'}
+                    todo_command[user_id] = {"url": cmd_url, "human_check":'true', "run_at":run_at,"user_text":user_text}
 
                 elif human_check=='false': 
                     add("處理程序：直接執行")
-                    # link, info, raw = execute_command("GET",cmd_url,user_id)
-                    # if link:
-                    #     add(f"下載連結：{link}")
-                    # if info:
-                    #     add(f"查詢結果：{info}")
                 elif human_check=='auto':
                     add("處理程序：等待確認，預設執行")
-                    todo_command[user_id] = {"url": cmd_url, "human_check":'auto'}
+                    todo_command[user_id] = {"url": cmd_url, "human_check":'auto', "run_at":run_at,"user_text":user_text}
 
                 link, info, raw = execute_command("GET",cmd_url,user_id)
+
+                # # ✅ 只有「查門市」這個任務改用 Flex
+                # if extracted_result == "storeBranchGuide":
+                #     print("門市導覽")
+                #     try:
+                #         # print(raw)
+                #         flex_contents = build_branches_flex(raw)  # raw 可是 dict 或 str，都處理
+                #         # print(flex_contents)
+                #         reply_flex(line_bot_api, event.reply_token, "門市導覽", flex_contents)
+                #     except Exception as e:
+                #         add(f"Flex 產生失敗：{e}")
+                #         # 退回文字版
+                #         if info:
+                #             add(f"查詢結果：{info}")
+                #         else:
+                #             add("查詢完成，但回傳格式異常。")
+                #         reply_text(line_bot_api, event.reply_token, "\n".join(reply_lines))
+
+
+                
+                # if extracted_result == "storeBranchGuide":
+                #     print("門市導覽 (改用 push)")
+
+                #     test_flex = {
+                #         "type": "carousel",
+                #         "contents": [
+                #             {
+                #                 "type": "bubble",
+                #                 "body": {
+                #                     "type": "box",
+                #                     "layout": "vertical",
+                #                     "contents": [
+                #                         {"type": "text", "text": "測試分店 A", "weight": "bold"},
+                #                         {"type": "text", "text": "桃園市中壢區遠東路135號", "wrap": True}
+                #                     ]
+                #                 }
+                #             },
+                #             {
+                #                 "type": "bubble",
+                #                 "body": {
+                #                     "type": "box",
+                #                     "layout": "vertical",
+                #                     "contents": [
+                #                         {"type": "text", "text": "測試分店 B", "weight": "bold"},
+                #                         {"type": "text", "text": "桃園市中壢區中北路200號", "wrap": True}
+                #                     ]
+                #                 }
+                #             }
+                #         ]
+                #     }
+
+                #     msg = FlexMessage(
+                #         alt_text="門市導覽",
+                #         contents=test_flex
+                #     )
+
+                #     print("準備送出 push Flex...")
+
+                #     try:
+                #         line_bot_api.push_message(
+                #             PushMessageRequest(
+                #                 to=event.source.user_id,  # ⭐ 這裡改用 user_id
+                #                 messages=[msg]
+                #             )
+                #         )
+                #         print("✅ push_message 成功")
+
+                #     except ApiException as e:
+                #         print("❌ LINE ApiException status:", e.status)
+                #         print("❌ LINE ApiException body:", getattr(e, "body", None))
+                #         traceback.print_exc()
+
+                #     return "OK", 200
+                
+
+
+                
                 if link:
                     add(f"下載連結：{link}")
                 if info:
@@ -597,4 +835,4 @@ def extract_best_matching_name(keyword, user_names, threshold=0.8):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=6000, debug=True)
+    app.run(host="0.0.0.0", port=SERVICE_PORT, debug=True)
