@@ -1,0 +1,63 @@
+{
+  "version": 2,
+  "locale": "zh-TW",
+
+  "classify_tree": {
+    "prompt_key": "identify_cs_intent",
+    "branch": [
+      { "match": "queryKB",         "task_id": "query_knowledge_base" },
+      { "match": "escalateSupport", "task_id": "escalate_support" },
+      { "match": "null",            "task_id": "fallback_greeting" }
+    ]
+  },
+
+  "tasks": {
+
+    "query_knowledge_base": {
+      "description": "使用者詢問 POS 系統操作或功能，從 43 節知識庫目錄選出對應節次，由後端載入 .md 內容後以 LLM 生成回答",
+      "human_check": "false",
+
+      "fields": {
+        "sections": {
+          "prompt_key": "get_cs_sections",
+          "required": true
+        }
+      },
+
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/kbcs/answer?sections={sections}"
+      }
+    },
+
+    "escalate_support": {
+      "description": "使用者申請轉接真人客服或遠端協助，建立支援工單並通知客服人員",
+      "human_check": "auto",
+
+      "fields": {
+        "issue_brief": {
+          "prompt_key": "get_issue_brief",
+          "required": false
+        }
+      },
+
+      "action": {
+        "method": "GET",
+        "confirm_method": "POST",
+        "confirm_body_keys": ["issue_brief"],
+        "url_template": "https://cwsoft.leaflune.org/kbcs/escalate?issue={issue_brief}"
+      }
+    },
+
+    "fallback_greeting": {
+      "description": "分類失敗或問題超出支援範圍時的友善提示",
+      "human_check": "false",
+      "fields": {},
+      "action": {
+        "method": "GET",
+        "url_template": "https://cwsoft.leaflune.org/ping"
+      }
+    }
+
+  }
+}
