@@ -1,219 +1,104 @@
-# CLAUDE.md
+# CLAUDE.md — 通用工作規範
 
-This file is for LLMs, coding agents, and automation tools that need to understand this repository quickly.
+> 這份文件是跨專案通用的 AI 協作規範。
+> 專案本身的架構、協定、技術細節寫在 `PROJECT.md`。
 
-## One-Sentence Summary
+@PROJECT.md
 
-`general-task-bot` is a LINE webhook service that uses LLM extractors plus config-driven task definitions to convert natural-language messages into backend API calls, with optional human confirmation and scheduled execution.
+---
 
-## Primary Entry Point
+## 檔案系統規範
 
-- [main.py](/c:/Users/USER/general-task-bot/main.py)
+每個專案應維護以下檔案，各司其職：
 
-If you only have time to read one file, read `main.py` first.
+| 檔案 | 對象 | 寫什麼 |
+|------|------|--------|
+| `CLAUDE.md` | Claude（AI） | 通用工作規範（本檔）+ @PROJECT.md |
+| `PROJECT.md` | Claude（AI） | 這個專案的架構、協定、已知坑、專案特有開發習慣 |
+| `README.md` | 陌生人 | 專案介紹、安裝、使用方式 |
+| `TODO.md` | 開發者 | 待辦、擱置功能、未來想法 |
+| `CHANGELOG.md` | 開發者/使用者 | 重大改動里程碑、架構決策紀錄 |
 
-## Mental Model
+### PROJECT.md 寫什麼
+- 這個專案是什麼（一段話定位）
+- 線上網址、部署方式
+- 架構概覽（目錄結構、關鍵檔案）
+- 通訊協定或 API 規格（不顯而易見的部分）
+- 已知 bug / quirk / 例外處理
+- 開發規範（commit 語言、避免大改的理由）
+- 專案特有開發習慣（命名規則、工具使用偏好、格式慣例等）
 
-This repo is not organized around hardcoded business logic per feature.
-It is organized around a reusable execution engine:
+### TODO.md 格式規則
+- `[ ]` 待辦，`[x]` 完成
+- 條目後附說明（why + 設計考量）
+- 有依賴關係的加 `> 需等 xxx 完成`
+- 用主題區段分組，不用時間順序
+- 擱置的功能附擱置原因
 
-- `prompts*.ini` tells the LLM what to extract
-- `mission*.json` tells the app how to classify intents and which action to run
-- `main.py` orchestrates the runtime flow
+### CHANGELOG.md 寫什麼
+- 功能完整上線的里程碑（不是每個 commit）
+- 架構層級的重大決策（換部署平台、協定改版）
+- 破壞性變更（舊介面不相容）
+- 重要會議或決策結果
+- **不寫**：小 bug fix、文字調整（那是 git log 的事）
 
-Most new features should be implemented by editing prompt and mission config first, and only editing Python when the framework itself needs new behavior.
+---
 
-## Runtime Flow
+## Sub-agent 工具規範
 
-The request lifecycle in [main.py](/c:/Users/USER/general-task-bot/main.py) is:
+本專案環境下可調用兩個 AI 小弟：
 
-1. Receive LINE webhook at `/callback/<oaid>`
-2. Resolve LINE credentials from `oa_registry.json`
-3. Parse incoming text message
-4. Rebuild `customerlist.txt` by running [generate_customerlist_simple.py](/c:/Users/USER/general-task-bot/generate_customerlist_simple.py)
-5. Check whether the user is responding to a pending confirmation flow
-6. Check whether the user is requesting todo list viewing
-7. Extract `run_at` if the message implies delayed execution
-8. Run the mission classifier using `classify_tree.prompt_key`
-9. Resolve a task from the classifier output
-10. Extract task fields with `gather_fields()`
-11. Optionally post-process a field with `match_pool` candidate matching
-12. Build the API URL with `build_command()`
-13. Depending on `human_check`, either:
-    wait for confirmation,
-    auto-confirm,
-    or execute immediately
-14. Execute the backend API via `execute_command()`
-15. Reply to the user on LINE
+### Gemini（`gemini -p "..."`)
+```bash
+gemini -p "你的 prompt"                                    # 基本用法
+gemini --include-directories "C:/path/outside" -p "..."   # 讀取 workspace 外的目錄
+gemini --yolo -p "..."                                     # 自動批准所有工具調用
+gemini -p "..." --output-format json                       # 結構化輸出，方便 Claude 解析
+timeout 60 gemini -p "..."                                 # 加 timeout 保護，避免等太久
+```
 
-## Important Files
+**適合交給 Gemini 的任務：**
+- 需要 web search 的研究（查競品、查 API 文件、查最新規範）
+- 批量生成相似內容（多篇文章、多個說明卡片）
+- 讀取 workspace 外的目錄（用 `--include-directories`）
+- 翻譯、改寫、潤稿
 
-- [main.py](/c:/Users/USER/general-task-bot/main.py)
-  Main Flask app and orchestration logic.
-- [prompts_system.ini](/c:/Users/USER/general-task-bot/prompts_system.ini)
-  Shared extractors used across modes.
-- [prompts.ini](/c:/Users/USER/general-task-bot/prompts.ini)
-  Default task prompts.
-- [prompts_pos.ini](/c:/Users/USER/general-task-bot/prompts_pos.ini)
-  POS-mode prompts.
-- [prompts_store.ini](/c:/Users/USER/general-task-bot/prompts_store.ini)
-  Store-mode prompts.
-- [prompts_cs.ini](/c:/Users/USER/general-task-bot/prompts_cs.ini)
-  Customer-support prompts.
-- [mission.json](/c:/Users/USER/general-task-bot/mission.json)
-  Default task definitions.
-- [mission_pos.json](/c:/Users/USER/general-task-bot/mission_pos.json)
-  POS task definitions.
-- [mission_store.json](/c:/Users/USER/general-task-bot/mission_store.json)
-  Store task definitions.
-- [mission_cs.json](/c:/Users/USER/general-task-bot/mission_cs.json)
-  Customer-support task definitions.
-- [todo_list.py](/c:/Users/USER/general-task-bot/todo_list.py)
-  SQLite helpers for scheduled tasks.
-- [todo_worker.py](/c:/Users/USER/general-task-bot/todo_worker.py)
-  Background executor for scheduled tasks.
-- [generate_customerlist_simple.py](/c:/Users/USER/general-task-bot/generate_customerlist_simple.py)
-  Rebuilds customer candidate names from SQL Server.
-- [TODO.md](/c:/Users/USER/general-task-bot/TODO.md)
-  Current implementation plan, especially for clarification flows.
+**不適合：**
+- 需要深度理解本專案架構的改動（它沒有這段對話的 context）
+- 需要跟使用者來回確認的決策性工作
 
-## Config System
+### Codex（`codex exec "..."`)
+```bash
+codex exec "你的 prompt"    # 非互動模式
+codex review                # code review 模式
+```
 
-### Prompt Files
+**適合交給 Codex 的任務：**
+- Code review（用 `codex review`）
+- 分析某段程式的邏輯或潛在問題
+- 生成符合現有 codebase 風格的程式碼片段
 
-`prompts*.ini` stores extractor prompts under `[extractors]`.
-Each extractor is expected to return a tightly constrained value, often:
+**注意：**
+- 預設 sandbox 是 read-only，執行 shell 命令會被擋
+- 模型為 gpt-5.4
 
-- an enum token
-- a single number
-- a date or datetime
-- `true` / `false`
-- `null`
+### 分工原則
+```
+批量生成相似內容             → gemini（並行或順序）
+需要 web search 的研究       → gemini
+讀取 workspace 外目錄        → gemini --include-directories
+Code review / 程式分析       → codex review
+需要跟使用者確認的決策       → 不委派，自己處理
+需要理解本專案 context 的改動 → 自己做
+```
 
-Agents should preserve this strictness. The runtime expects machine-readable outputs, not free-form prose.
+---
 
-### Mission Files
+## Branch / 部署策略
 
-Each `mission*.json` file defines:
+```
+功能開發    → dev 分支（或 feature/xxx）
+穩定版本    → merge to master
+部署        → 直接在目標機器 git pull 後重啟 main.py
+```
 
-- `classify_tree`
-  Maps classifier outputs to `task_id`
-- `tasks`
-  Defines the fields required to execute each task
-
-Each task usually contains:
-
-- `description`
-- `human_check`
-- `fields`
-- `action`
-
-Field metadata can include:
-
-- `prompt_key`
-- `required`
-- `reference`
-- `match_pool`
-
-## Human Confirmation Model
-
-`human_check` has three meanings:
-
-- `false`
-  Execute directly.
-- `true`
-  Always wait for explicit user confirmation.
-- `auto`
-  Store a pending command and allow an implicit default path when the follow-up reply is ambiguous.
-
-Pending confirmation state is stored in the in-memory `todo_command` dict inside [main.py](/c:/Users/USER/general-task-bot/main.py).
-
-## Name Matching
-
-Name extraction is not trusted blindly.
-When a field specifies `match_pool`, the runtime:
-
-1. Loads a candidate list
-2. Compares extracted text against candidates
-3. Uses Chinese pinyin similarity plus plain string similarity
-4. Replaces the extracted value with the best candidate when confidence is high enough
-
-This is especially important for customer names affected by ASR mistakes, homophones, or informal phrasing.
-
-## Scheduling
-
-Delayed tasks are written to `todo_list.db`.
-The schema and insert/list logic live in [todo_list.py](/c:/Users/USER/general-task-bot/todo_list.py).
-Execution is handled by [todo_worker.py](/c:/Users/USER/general-task-bot/todo_worker.py).
-
-Current model:
-
-- `main.py` detects delayed execution intent
-- A pending record is inserted into sqlite
-- `todo_worker.py` periodically scans for due tasks and POSTs them
-
-## Modes
-
-The program chooses prompt and mission files from command-line arguments:
-
-- `python main.py`
-  Uses `prompts.ini` and `mission.json`
-- `python main.py pos`
-  Uses `prompts_pos.ini` and `mission_pos.json`
-- `python main.py store`
-  Uses `prompts_store.ini` and `mission_store.json`
-- `python main.py cs`
-  Uses `prompts_cs.ini` and `mission_cs.json`
-
-Optional second argument sets the port.
-
-## External Dependencies and Local Secrets
-
-This repo depends on local/private resources that may not exist in a clean checkout:
-
-- `.env`
-  Holds LLM provider API keys such as `GROQ_API_KEY`, `HF_TOKEN`, `OPENROUTER_API_KEY`
-- `oa_registry.json`
-  Maps `oaid` to LINE channel credentials
-- SQL Server connectivity
-  Required by [generate_customerlist_simple.py](/c:/Users/USER/general-task-bot/generate_customerlist_simple.py)
-
-Do not assume the repo is runnable without these files.
-
-## Editing Guidance for Agents
-
-- Start by checking whether the change belongs in config or framework code.
-- Prefer editing `prompts*.ini` and `mission*.json` for new business tasks.
-- Edit `main.py` only when the runtime needs a new capability.
-- Preserve extractor output contracts.
-- Be careful with confirmation flows in `todo_command`; they are stateful and user-facing.
-- Be careful with text encoding when editing Chinese content.
-- Do not remove or overwrite ignored private files such as `oa_registry.json`.
-
-## Current Work In Progress
-
-[TODO.md](/c:/Users/USER/general-task-bot/TODO.md) currently describes a planned clarification feature:
-
-- return top-N candidate names instead of only one best match
-- detect low-confidence name matches in `gather_fields()`
-- add a `pending_clarification` state to `todo_command`
-- let `callback()` continue execution after the user selects the intended company
-- ideally use LINE Quick Reply instead of plain text
-
-If a task mentions clarification, ambiguity, top-N matching, or Quick Reply, read `TODO.md` before changing code.
-
-## Suggested Reading Order for a New Agent
-
-1. [main.py](/c:/Users/USER/general-task-bot/main.py)
-2. [mission_cs.json](/c:/Users/USER/general-task-bot/mission_cs.json) or the mission file relevant to your mode
-3. [prompts_cs.ini](/c:/Users/USER/general-task-bot/prompts_cs.ini) or the prompt file relevant to your mode
-4. [docs/mission_json_guide.md](/c:/Users/USER/general-task-bot/docs/mission_json_guide.md)
-5. [docs/prompts_ini_guide.md](/c:/Users/USER/general-task-bot/docs/prompts_ini_guide.md)
-6. [TODO.md](/c:/Users/USER/general-task-bot/TODO.md)
-
-## Safe Assumptions
-
-- The project is intended for Traditional Chinese usage.
-- The repo may be in active local development and may contain uncommitted changes.
-- Mission and prompt files are business-critical and often more important than helper scripts.
-- A feature request may only require config changes rather than Python changes.
