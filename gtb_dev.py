@@ -25,7 +25,7 @@ if GTB_DIR not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(os.path.join(GTB_DIR, ".env"))  # 從 general-task-bot/.env 載入 API 金鑰
 
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi,
     ReplyMessageRequest, TextMessage,
@@ -44,6 +44,13 @@ from todo_list import init_todo_db, insert_todo_item, view_todo_list
 import db_helper
 from llm_clients import call_provider
 
+# Track B（Agent 模式）用：暴力雙問。
+# 預設走 codex_cli + gpt-5.4，但 /sim 可以在 body 帶 agent_provider/agent_model 覆寫，
+# 用來實驗「同 LLM 模型走 cascade vs 走 agent 一坨 mega-prompt」哪個準。
+AGENT_PROVIDER = "codex_cli"
+AGENT_MODEL    = "gpt-5.4"
+AGENT_TIMEOUT  = 120
+
 
 # ===== 啟動參數 =====
 
@@ -51,6 +58,7 @@ parser = argparse.ArgumentParser(description="General Task Bot")
 parser.add_argument("--conf", default="", help="config suffix, such as cs / pos / store")
 parser.add_argument("--port", default=6000, type=int, help="service port, default 6000")
 parser.add_argument("--mode", default="normal", help="run mode: normal / shadow")
+parser.add_argument("--db-dir", default="database", help="database directory name under cwd (e.g. database / database_dev)")
 args = parser.parse_args()
 
 suffix      = f"_{args.conf}" if args.conf else ""
@@ -58,11 +66,13 @@ PROMPTS_FILE = os.path.join(PROJECT_DIR, "config", f"prompts{suffix}.ini")
 MISSION_FILE = os.path.join(PROJECT_DIR, "config", f"mission{suffix}.json")
 SERVICE_PORT = args.port
 SHADOW_MODE  = (args.mode == "shadow")
+DB_DIR       = os.path.join(PROJECT_DIR, args.db_dir)
 DEBUG_MODE   = True
 
 print(f"[BOOT] PROJECT_DIR  = {PROJECT_DIR}")
 print(f"[BOOT] PROMPTS_FILE = {PROMPTS_FILE}")
 print(f"[BOOT] MISSION_FILE = {MISSION_FILE}")
+print(f"[BOOT] DB_DIR       = {DB_DIR}")
 print(f"[BOOT] PORT         = {SERVICE_PORT}")
 print(f"[BOOT] MODE         = {'shadow' if SHADOW_MODE else 'normal'}")
 
@@ -74,8 +84,8 @@ if not os.path.exists(MISSION_FILE):
 
 # ===== LLM 設定 =====
 
-PROVIDER  = "groq"
-LLM_MODEL = "llama-3.3-70b-versatile"
+PROVIDER  = "home_ollama"
+LLM_MODEL = "qwen3.5:2b"
 
 
 # ===== 載入 prompts =====
@@ -101,18 +111,18 @@ app = Flask(__name__)
 
 # ===== 排程資料庫 =====
 
-DB_PATH = os.path.join(PROJECT_DIR, "database", "todo_list.db")
+DB_PATH = os.path.join(DB_DIR, "todo_list.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 init_todo_db(DB_PATH)
 
 # ===== 對話資料庫 =====
 
-CONFIG_DB_PATH = os.path.join(PROJECT_DIR, "database", "config.db")
+CONFIG_DB_PATH = os.path.join(DB_DIR, "config.db")
 db_helper.init_config_db(CONFIG_DB_PATH)
 
 # ===== 影子模式資料庫 =====
 
-SHADOW_DB_PATH = os.path.join(PROJECT_DIR, "database", "shadow.db")
+SHADOW_DB_PATH = os.path.join(DB_DIR, "shadow.db")
 
 def init_shadow_db():
     conn = sqlite3.connect(SHADOW_DB_PATH)
@@ -286,6 +296,46 @@ def run_extractor(prompt_key: str, user_input: str, ref=None, with_confidence: b
         raw = raw.split("</think>", 1)[1]
     return (raw or "").strip()
 
+
+def resolve_task_from_tree(tree: dict, user_text: str, intent_chain=None):
+    """遞迴解析 classify_tree → (task_id, intent_chain)。
+
+    兼容兩種結構：
+    - 平面（cs / 早期 pos）：branch 含 task_id；"null" 是 catch-all
+    - 階梯（aquan-dev mission_pos_dev.json）：branch 可含 subtree；"next" 表「不在此層，下一階分」
+    LLM 沒命中任何 branch.match 時，fallback 到 "null"/"next" 分支。
+    每層各自支援 with_confidence flag。
+    """
+    if intent_chain is None:
+        intent_chain = []
+
+    with_conf = bool(tree.get("with_confidence", False))
+    raw       = run_extractor(tree["prompt_key"], user_text, with_confidence=with_conf)
+    if with_conf:
+        parsed = _parse_value_confidence(raw)
+        intent = parsed["value"]
+        intent_chain.append({"intent": intent, "confidence": parsed["confidence"]})
+    else:
+        intent = raw
+        intent_chain.append(intent)
+
+    matched_branch  = None
+    fallback_branch = None
+    for branch in tree["branch"]:
+        if branch["match"] == intent:
+            matched_branch = branch
+            break
+        if branch["match"] in ("null", "next"):
+            fallback_branch = branch
+
+    chosen = matched_branch or fallback_branch
+    if chosen is None:
+        return None, intent_chain
+    if "subtree" in chosen:
+        return resolve_task_from_tree(chosen["subtree"], user_text, intent_chain)
+    return chosen.get("task_id"), intent_chain
+
+
 def read_match_pool(pool_file: str):
     path = os.path.join(PROJECT_DIR, pool_file)
     try:
@@ -295,10 +345,28 @@ def read_match_pool(pool_file: str):
         return []
 
 def calculate_phonetic_similarity(name1, name2):
-    return SequenceMatcher(None, "".join(lazy_pinyin(name1)), "".join(lazy_pinyin(name2))).ratio()
+    """拼音相似度 + substring 高優先
+    原本 SequenceMatcher.ratio() = 2*M/(len1+len2)，分母含 candidate 全長 →
+    短 keyword 對長 candidate 即使完整命中也會被長度稀釋
+    （例：「零壹」 lingyi 對「零壹通訊行」 0.52；對「林一」 linyi 卻 0.91）。
+    修法：**keyword pinyin 是 candidate pinyin 的 substring → 直接走 0.95~1.0 高優先**，
+    覆蓋音近模糊匹配，因為 substring 完整命中是更強的 match signal。
+    """
+    p1 = "".join(lazy_pinyin(name1))
+    p2 = "".join(lazy_pinyin(name2))
+    if p1 and p1 in p2:
+        coverage = len(p1) / max(len(p2), 1)
+        return 0.95 + 0.05 * coverage
+    return SequenceMatcher(None, p1, p2).ratio()
 
 def calculate_word_similarity(name1, name2):
-    return SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
+    """英文相似度 + substring 高優先（同 calculate_phonetic_similarity 邏輯）"""
+    n1 = name1.lower()
+    n2 = name2.lower()
+    if n1 and n1 in n2:
+        coverage = len(n1) / max(len(n2), 1)
+        return 0.95 + 0.05 * coverage
+    return SequenceMatcher(None, n1, n2).ratio()
 
 def process_mixed_name(name):
     return ("".join(re.findall(r"[\u4e00-\u9fff]+", name)),
@@ -406,6 +474,149 @@ def gather_fields(task_id: str, mission_data: dict, user_text: str):
             missing.append(field_name)
 
     return values, missing, task_cfg, field_confidence, clarification_needed
+
+# ===== Track B: Agent 模式（暴力雙問） =====
+# 原本切碎成 N 個 extractor 餵 LLM 小小鳥的設計，agent 模式整合成 2 個大 prompt 餵 codex 老鷹：
+#   Q1 哪個任務 → 把 mission JSON 所有 task description 拼進 context，回 task_id
+#   Q2 怎麼做   → 把選中 task 的 fields schema 拼進 context，回 values dict
+# 名稱對 customerlist 拼音相似度比對等後處理留在 Python 層。
+
+def _parse_agent_json(text: str, key: str, default):
+    """寬鬆 JSON parse：去掉 ``` fence、抓第一個 {...}、取指定 key。失敗回 default。"""
+    if not text:
+        return default
+    s = text.strip()
+    # 去 markdown code fence
+    s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*```\s*$", "", s)
+    # 抓第一個 {...} 區塊（含巢狀，最簡單抓法：最外層 brace）
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return default
+    try:
+        obj = json.loads(m.group(0))
+        return obj.get(key, default)
+    except Exception:
+        return default
+
+def _build_q1_classify_prompt(user_text: str) -> str:
+    """Q1: 拼出「哪個任務」mega-prompt — 列出所有 task_id + description。"""
+    lines = []
+    for tid, tcfg in mission_data.get("tasks", {}).items():
+        desc = (tcfg.get("description") or "").strip()
+        lines.append(f"- {tid}: {desc}")
+    today = reference_content.get("today_date", "")
+    return (
+        "你是任務分類器。從以下任務清單中，選一個最匹配使用者訊息的 task_id。\n\n"
+        "[可用任務]\n"
+        + "\n".join(lines)
+        + f"\n\n[使用者訊息]\n{user_text}\n\n"
+        f"[reference]\ntoday_date: {today}\n\n"
+        "只輸出一行 JSON，不要任何前後說明或 markdown fence：\n"
+        '{"task_id":"<從清單中選一個 task_id>"}\n'
+        '若都不像，輸出 {"task_id":"fallback_greeting"}。\n'
+    )
+
+def _build_q2_extract_prompt(task_id: str, user_text: str) -> str:
+    """Q2: 拼出「怎麼做」mega-prompt — 列出該 task 的所有欄位定義。"""
+    task_cfg   = mission_data["tasks"].get(task_id) or {}
+    fields_cfg = task_cfg.get("fields", {}) or {}
+    today      = reference_content.get("today_date", "")
+    if not fields_cfg:
+        return ""
+    lines = []
+    for fname, fmeta in fields_cfg.items():
+        req       = "必填" if fmeta.get("required") else "選填"
+        pool      = fmeta.get("match_pool")
+        ref       = bool(fmeta.get("reference"))
+        hints = []
+        if pool:
+            hints.append(f"客戶名稱（之後系統會用 {pool} 做拼音模糊比對）")
+        if ref:
+            hints.append("可參考 today_date")
+        suffix = f"（{' / '.join(hints)}）" if hints else ""
+        lines.append(f"- {fname}（{req}）{suffix}")
+    return (
+        f"從使用者訊息中，抽出 task_id={task_id} 需要的所有欄位。\n\n"
+        f"[任務說明]\n{task_cfg.get('description', '')}\n\n"
+        "[欄位清單]\n"
+        + "\n".join(lines)
+        + f"\n\n[使用者訊息]\n{user_text}\n\n"
+        f"[reference]\ntoday_date: {today}\n\n"
+        "只輸出一行 JSON，不要任何前後說明或 markdown fence：\n"
+        '{"values":{"field_name":"value", ...}}\n'
+        '無法從訊息抽出的欄位填字串 "null"。'
+    )
+
+def agent_classify_and_extract(user_text: str, provider_override: str = None, model_override: str = None):
+    """Track B 主流程：兩個 LLM 呼叫 + 名稱 match_pool 後處理。
+
+    預設 provider/model 走 AGENT_PROVIDER / AGENT_MODEL（codex_cli + gpt-5.4）。
+    可在 /sim body 帶 agent_provider / agent_model 覆寫，方便實驗
+    「同 LLM 模型走 cascade vs 走 agent 一坨 mega-prompt」哪個準。
+
+    Returns:
+        task_id, values, missing, errors(list), debug(dict)
+    """
+    provider = provider_override or AGENT_PROVIDER
+    model    = model_override    or AGENT_MODEL
+    errors = []
+    debug = {"provider": provider, "model": model, "q1": {}, "q2": {}}
+
+    # reasoning 模型走 agent flow 時打開 think（mega-prompt 是它的舒適圈）；
+    # **非 reasoning 模型送 think=True 會被 Ollama 直接 400**（gemma3/qwen2.5/llama3 等）；
+    # think=False 才是普世安全。所以只對 reasoning 模型白名單開 think。
+    model_l = (model or "").lower()
+    think_capable = any(s in model_l for s in ("qwen3", "deepseek-r1", "gpt-oss"))
+    agent_think = think_capable
+
+    # ----- Q1: 分類 -----
+    q1_prompt = _build_q1_classify_prompt(user_text)
+    r1 = call_provider(provider, q1_prompt, model, timeout=AGENT_TIMEOUT, think=agent_think)
+    debug["q1"] = {"ok": r1.ok, "latency_sec": round(r1.latency_sec, 2), "raw": r1.text[:300], "error": r1.error[:200]}
+    if not r1.ok:
+        errors.append(f"agent Q1 failed: {r1.error[:200]}")
+        return None, {}, [], errors, debug
+
+    task_id = _parse_agent_json(r1.text, "task_id", default="fallback_greeting")
+    if task_id not in mission_data.get("tasks", {}):
+        errors.append(f"agent Q1 returned unknown task_id: {task_id}")
+        task_id = "fallback_greeting"
+
+    task_cfg   = mission_data["tasks"][task_id]
+    fields_cfg = task_cfg.get("fields", {}) or {}
+
+    # 沒欄位的 task（如 fallback_greeting / refresh_companies）直接收工
+    if not fields_cfg:
+        return task_id, {}, [], errors, debug
+
+    # ----- Q2: 抽欄位 -----
+    q2_prompt = _build_q2_extract_prompt(task_id, user_text)
+    r2 = call_provider(provider, q2_prompt, model, timeout=AGENT_TIMEOUT, think=agent_think)
+    debug["q2"] = {"ok": r2.ok, "latency_sec": round(r2.latency_sec, 2), "raw": r2.text[:300], "error": r2.error[:200]}
+    if not r2.ok:
+        errors.append(f"agent Q2 failed: {r2.error[:200]}")
+        return task_id, {}, [], errors, debug
+
+    raw_values = _parse_agent_json(r2.text, "values", default={})
+    if not isinstance(raw_values, dict):
+        raw_values = {}
+
+    # ----- 後處理：name match_pool（拼音相似度）+ missing 判定 -----
+    customer_pool = read_match_pool("customerlist.txt")
+    values, missing = {}, []
+    for fname, fmeta in fields_cfg.items():
+        raw = str(raw_values.get(fname, "null")).strip() or "null"
+        if fmeta.get("match_pool") == "customerlist.txt" and raw and raw != "null":
+            matched = extract_best_matching_name(raw, customer_pool, threshold=0.8)
+            values[fname] = matched if matched and matched != "null" else raw
+        else:
+            values[fname] = raw
+        if fmeta.get("required") and (values[fname] == "null" or not values[fname]):
+            missing.append(fname)
+
+    return task_id, values, missing, errors, debug
+
 
 def build_command(action: dict, values: dict):
     url_tmpl = action.get("url_template", "")
@@ -578,28 +789,11 @@ def callback(oaid):
             # ── 影子模式 ──────────────────────────────────────────────────────
             if SHADOW_MODE:
                 upsert_user(user_id, display_name)
-                # 分類意圖
-                # 分類意圖
-                classify_tree    = mission_data["classify_tree"]
-                tree_with_conf = bool(classify_tree.get("with_confidence", False))
-                extracted_intent_raw = run_extractor(classify_tree["prompt_key"], user_text, with_confidence=tree_with_conf)
-                if tree_with_conf:
-                    parsed_intent = _parse_value_confidence(extracted_intent_raw)
-                    extracted_intent = parsed_intent["value"]
-                    print("intent confidence:", parsed_intent["confidence"])
-                else:
-                    extracted_intent = extracted_intent_raw
-                print("intent:", extracted_intent)
-
-                task_id = None
-                fallback_id = None
-                for branch in classify_tree["branch"]:
-                    if branch["match"] == extracted_intent:
-                        task_id = branch["task_id"]
-                        break
-                    if branch["match"] == "null":
-                        fallback_id = branch["task_id"]
-                task_id = task_id or fallback_id
+                # 分類意圖（支援階梯式 subtree 遞迴）
+                task_id, intent_chain = resolve_task_from_tree(mission_data["classify_tree"], user_text)
+                last_entry = intent_chain[-1] if intent_chain else ""
+                extracted_intent = last_entry["intent"] if isinstance(last_entry, dict) else last_entry
+                print("intent_chain:", intent_chain, "→ task_id:", task_id)
                 # 抽取欄位
                 values, missing, task_cfg, field_confidence, _ = gather_fields(task_id, mission_data, user_text)
                 print("field_confidence:", field_confidence)
@@ -623,7 +817,7 @@ def callback(oaid):
                 continue  # 不回覆 LINE
             # ── 一般模式 ──────────────────────────────────────────────────────
             # ── 一般模式 ──────────────────────────────────────────────────────
-            conv_db      = db_helper.get_or_create_conv_db(CONFIG_DB_PATH, oaid, user_id, display_name, PROJECT_DIR)
+            conv_db      = db_helper.get_or_create_conv_db(CONFIG_DB_PATH, oaid, user_id, display_name, DB_DIR)
             content_type = "image" if msg_type == "image" else "text"
 
             reply_lines = []
@@ -750,25 +944,10 @@ def callback(oaid):
             if run_at == "null":
                 run_at = "now"
 
-            classify_tree    = mission_data["classify_tree"]
-            tree_with_conf = bool(classify_tree.get("with_confidence", False))
-            extracted_result_raw = run_extractor(classify_tree["prompt_key"], user_text, with_confidence=tree_with_conf)
-            if tree_with_conf:
-                parsed_result = _parse_value_confidence(extracted_result_raw)
-                extracted_result = parsed_result["value"]
-                add(f"分類信心值：{parsed_result['confidence']}")
-            else:
-                extracted_result = extracted_result_raw
-            print("extracted_result:", extracted_result)
-
-            task_id, fallback_id = None, None
-            for branch in classify_tree["branch"]:
-                if branch["match"] == extracted_result:
-                    task_id = branch["task_id"]
-                    break
-                if branch["match"] == "null":
-                    fallback_id = branch["task_id"]
-            task_id = task_id or fallback_id
+            # 分類意圖（支援階梯式 subtree 遞迴）
+            task_id, intent_chain = resolve_task_from_tree(mission_data["classify_tree"], user_text)
+            add(f"分類過程：{intent_chain}")
+            print("intent_chain:", intent_chain, "→ task_id:", task_id)
 
             if not task_id:
                 add("無法判斷對應任務")
@@ -830,6 +1009,129 @@ def callback(oaid):
             db_helper.log_message(conv_db, session_id, "out", "\n".join(reply_lines), "text", out_role)
 
     return "OK", 200
+
+
+# ============================================================================
+# 後門：壓測 / 老闆歷史考題用 dry-run 入口
+# ============================================================================
+# 設計原則：兩邊互動都是假的
+#   向上對 LINE OA：不驗 signature、不打任何 LINE API（含 reply / push / loading）
+#   向下對 downstream API：不真打 sqlgate / autoQuotes 等服務，只記錄會打哪支
+# 後門只測：chatbot 跟人訊息互動的應答對不對 —— 能不能問出正確的問題、組出
+# 正確的 API 動作（cmd_url）。實際 SQL / 報價單副作用不在測試範圍。
+
+@app.route("/sim/<oaid>", methods=["POST"])
+def sim(oaid):
+    """模擬 LINE webhook event 的後門 dry-run 入口（壓測 / 考題用）。
+
+    Payload (JSON):
+        user_id      必填，模擬使用者 ID
+        user_text    必填，模擬使用者訊息
+        display_name 選填，預設 = user_id
+        source_type  選填，user / group / room（預設 user，目前僅 echo）
+        msg_type     選填，text / image（預設 text，僅 echo）
+
+    回傳：
+        ok / oaid / user_id / user_text
+        intent           classify_tree 解出的最終（leaf-level）intent
+        intent_chain     遞迴解 tree 的 intent 路徑（階梯式可見每層判斷；平面結構只有一個）
+        task_id          對應 task
+        values           gather_fields 抽出的欄位
+        missing          缺的 required 欄位（若非空 → 「會問使用者補哪些」）
+        field_confidence 各欄位信心值（mission 有開 with_confidence 才會有值）
+        cmd_url          build_command 組出的 URL（「會打哪支 API」記錄，不真打）
+        timing_ms        整支 handler 耗時（不含 client↔server 網路）
+        errors           錯誤列表（若有）
+    """
+    t0 = time.time()
+    result = {
+        "ok": True,
+        "oaid": oaid,
+        "user_id": None,
+        "user_text": "",
+        "intent": None,
+        "intent_chain": [],
+        "task_id": None,
+        "values": {},
+        "missing": [],
+        "field_confidence": {},
+        "cmd_url": None,
+        "errors": [],
+    }
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        user_id      = payload.get("user_id") or "Usim_default"
+        display_name = payload.get("display_name") or user_id
+        user_text    = (payload.get("user_text") or "").strip()
+        result["user_id"]   = user_id
+        result["user_text"] = user_text
+
+        if not user_text:
+            result["ok"] = False
+            result["errors"].append("user_text is empty")
+            result["timing_ms"] = int((time.time() - t0) * 1000)
+            return jsonify(result), 400
+
+        mode = (payload.get("mode") or "llm").strip().lower()
+        print(f"[SIM] oaid={oaid} user={display_name} mode={mode} msg={user_text}")
+
+        # ----- Agent 模式：暴力雙問（Q1 task_id / Q2 values）→ 不走 cascade 也不走切碎 extractor -----
+        if mode == "agent":
+            agent_provider = (payload.get("agent_provider") or "").strip() or None
+            agent_model    = (payload.get("agent_model") or "").strip() or None
+            task_id, values, missing, agent_errors, agent_debug = agent_classify_and_extract(
+                user_text, provider_override=agent_provider, model_override=agent_model
+            )
+            result["mode"]             = "agent"
+            result["task_id"]          = task_id
+            result["intent"]           = task_id  # agent 模式沒有 cascade，最終 intent == task_id
+            result["intent_chain"]     = [task_id] if task_id else []
+            result["values"]           = values
+            result["missing"]          = missing
+            result["field_confidence"] = {}
+            result["agent_debug"]      = agent_debug
+            if agent_errors:
+                result["errors"].extend(agent_errors)
+            if task_id and not missing:
+                action = (mission_data["tasks"].get(task_id, {}).get("action") or {})
+                cmd_url, _ = build_command(action, values)
+                result["cmd_url"] = cmd_url
+            result["timing_ms"] = int((time.time() - t0) * 1000)
+            return jsonify(result), 200
+
+        # ----- LLM 模式（原本路徑）：cascade tier 分類 + 切碎 extractor 抽欄位 -----
+        result["mode"] = "llm"
+        # 分類意圖（支援階梯式 subtree 遞迴；與 shadow / normal 一致）
+        task_id, intent_chain = resolve_task_from_tree(mission_data["classify_tree"], user_text)
+        last_entry = intent_chain[-1] if intent_chain else ""
+        extracted_intent = last_entry["intent"] if isinstance(last_entry, dict) else last_entry
+        result["intent"]       = extracted_intent
+        result["intent_chain"] = intent_chain
+        result["task_id"]      = task_id
+
+        if not task_id:
+            result["errors"].append("no task_id resolved")
+            result["timing_ms"] = int((time.time() - t0) * 1000)
+            return jsonify(result), 200
+
+        # 抽欄位
+        values, missing, task_cfg, field_confidence, _ = gather_fields(task_id, mission_data, user_text)
+        result["values"]           = values
+        result["missing"]          = missing
+        result["field_confidence"] = field_confidence
+
+        # 組 cmd_url（記錄「會打哪支 API」但不真打 — 向下對 downstream 也是假的）
+        if not missing:
+            action     = task_cfg.get("action") or {}
+            cmd_url, _ = build_command(action, values)
+            result["cmd_url"] = cmd_url
+
+    except Exception as exc:
+        result["ok"] = False
+        result["errors"].append(f"{type(exc).__name__}: {exc}")
+
+    result["timing_ms"] = int((time.time() - t0) * 1000)
+    return jsonify(result), 200
 
 
 if __name__ == "__main__":

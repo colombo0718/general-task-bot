@@ -318,8 +318,8 @@ def gather_fields(task_id: str, mission_data: dict, user_text: str):
                     candidates = []
 
             if candidates:
-                # 門檻可先固定 0.8；之後若要可從 meta 讀 match_threshold
-                best = extract_best_matching_name(values[field_name], candidates, threshold=0.8)
+                # threshold=0：pool 有候選就一定從裡面取最高分，不保留 LLM 錯誤輸出
+                best = extract_best_matching_name(values[field_name], candidates, threshold=0.0)
                 if best and best.lower() != "null":
                     values[field_name] = best
             print("new ",field_name,values[field_name])
@@ -529,6 +529,20 @@ def callback(oaid):
             # 只處理文字訊息
             if getattr(event, "message", None) and getattr(event.message, "text", None):
                 user_text = event.message.text.strip()
+
+                # 顯示 LINE 載入動畫（讓使用者知道 bot 正在處理）
+                try:
+                    requests.post(
+                        "https://api.line.me/v2/bot/chat/loading/start",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {channel_access_token}"
+                        },
+                        json={"chatId": event.source.user_id, "loadingSeconds": 20},
+                        timeout=5
+                    )
+                except Exception:
+                    pass  # 動畫失敗不影響主流程
 
                 # 強插更新客戶列表的小程式，之後想辦法拿掉
                 subprocess.run([sys.executable, "generate_customerlist_simple.py"], check=True)

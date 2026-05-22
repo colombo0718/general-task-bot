@@ -143,37 +143,52 @@ def upsert_user(user_id: str, display_name: str):
     conn.close()
 
 def init_user_message_table(user_id: str):
-    """為每個使用者建立自己的訊息紀錄表。"""
+    """為每個對話通道（user / group / room）建立自己的訊息紀錄表。"""
     safe_id = re.sub(r"[^A-Za-z0-9_]", "_", user_id)
     table   = f"messages_{safe_id}"
     conn    = sqlite3.connect(SHADOW_DB_PATH)
     cur     = conn.cursor()
     cur.execute(f"""
         CREATE TABLE IF NOT EXISTS {table} (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            received_at  TEXT,
-            oaid         TEXT,
-            user_message TEXT,
-            intent       TEXT,
-            task_id      TEXT,
-            ai_draft     TEXT,
-            staff_reply  TEXT
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            received_at          TEXT,
+            oaid                 TEXT,
+            user_message         TEXT,
+            intent               TEXT,
+            task_id              TEXT,
+            ai_draft             TEXT,
+            staff_reply          TEXT,
+            image_path           TEXT,
+            sender_user_id       TEXT,
+            sender_display_name  TEXT
         )
     """)
+    # 舊 table migration：image_path / sender_* 是後加的欄位
+    for col_def in ("image_path TEXT", "sender_user_id TEXT", "sender_display_name TEXT"):
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
     return table
 
 def save_shadow_message(user_id: str, oaid: str, user_message: str,
-                         intent: str, task_id: str, ai_draft: str):
+                         intent: str, task_id: str, ai_draft: str,
+                         image_path: str = None,
+                         sender_user_id: str = None,
+                         sender_display_name: str = None):
     table = init_user_message_table(user_id)
     now   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn  = sqlite3.connect(SHADOW_DB_PATH)
     cur   = conn.cursor()
     cur.execute(f"""
-        INSERT INTO {table} (received_at, oaid, user_message, intent, task_id, ai_draft)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (now, oaid, user_message, intent, task_id, ai_draft or ""))
+        INSERT INTO {table}
+            (received_at, oaid, user_message, intent, task_id, ai_draft, image_path,
+             sender_user_id, sender_display_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (now, oaid, user_message, intent, task_id, ai_draft or "", image_path,
+          sender_user_id, sender_display_name))
     conn.commit()
     conn.close()
 
@@ -340,10 +355,29 @@ def read_match_pool(pool_file: str):
         return []
 
 def calculate_phonetic_similarity(name1, name2):
-    return SequenceMatcher(None, "".join(lazy_pinyin(name1)), "".join(lazy_pinyin(name2))).ratio()
+    """拼音相似度 + substring 高優先
+    原本 SequenceMatcher.ratio() = 2*M/(len1+len2)，分母含 candidate 全長 →
+    短 keyword 對長 candidate 即使完整命中也會被長度稀釋
+    （例：「零壹」 lingyi 對「零壹通訊行」 0.52；對「林一」 linyi 卻 0.91）。
+    修法：**keyword pinyin 是 candidate pinyin 的 substring → 直接走 0.95~1.0 高優先**，
+    覆蓋音近模糊匹配，因為 substring 完整命中是更強的 match signal。
+    """
+    p1 = "".join(lazy_pinyin(name1))
+    p2 = "".join(lazy_pinyin(name2))
+    if p1 and p1 in p2:
+        # coverage 越高（keyword 占 candidate 越多）分數越高
+        coverage = len(p1) / max(len(p2), 1)
+        return 0.95 + 0.05 * coverage
+    return SequenceMatcher(None, p1, p2).ratio()
 
 def calculate_word_similarity(name1, name2):
-    return SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
+    """英文相似度 + substring 高優先（同 calculate_phonetic_similarity 邏輯）"""
+    n1 = name1.lower()
+    n2 = name2.lower()
+    if n1 and n1 in n2:
+        coverage = len(n1) / max(len(n2), 1)
+        return 0.95 + 0.05 * coverage
+    return SequenceMatcher(None, n1, n2).ratio()
 
 def process_mixed_name(name):
     return ("".join(re.findall(r"[\u4e00-\u9fff]+", name)),
@@ -583,7 +617,48 @@ def callback(oaid):
 
             # ── 影子模式 ──────────────────────────────────────────────────────
             if SHADOW_MODE:
-                upsert_user(user_id, display_name)
+                # 對話通道 conv_id：1-on-1 用 sender user_id；group/room 用 group_id/room_id（加前綴避免跟 user_id 撞）
+                # display_name：group/room 試抓群組名，抓不到用 ID 前 8 字元
+                sender_user_id      = user_id
+                sender_display_name = display_name
+                if source_type == "group":
+                    gid     = event.source.group_id
+                    conv_id = f"G_{gid}"
+                    try:
+                        summary = line_bot_api.get_group_summary(gid)
+                        conv_display_name = f"👥 {summary.group_name}"
+                    except Exception:
+                        conv_display_name = f"👥 群組 {gid[:8]}"
+                elif source_type == "room":
+                    rid     = event.source.room_id
+                    conv_id = f"R_{rid}"
+                    conv_display_name = f"👥 多人聊天 {rid[:8]}"
+                else:
+                    conv_id           = sender_user_id
+                    conv_display_name = sender_display_name
+
+                upsert_user(conv_id, conv_display_name)
+
+                # 圖片立刻下載（Content API 短時間內有效，事後拉不到）
+                image_path = None
+                if msg_type == "image":
+                    message_id_line = event.message.id
+                    img_dir = os.path.join(PROJECT_DIR, "database", "images")
+                    os.makedirs(img_dir, exist_ok=True)
+                    img_file = os.path.join(img_dir, f"{message_id_line}.jpg")
+                    try:
+                        img_resp = requests.get(
+                            f"https://api-data.line.me/v2/bot/message/{message_id_line}/content",
+                            headers={"Authorization": f"Bearer {channel_access_token}"},
+                            timeout=10
+                        )
+                        img_resp.raise_for_status()
+                        with open(img_file, "wb") as f:
+                            f.write(img_resp.content)
+                        image_path = f"images/{message_id_line}.jpg"
+                        print(f"[SHADOW] 圖片已存：{image_path}")
+                    except Exception as e:
+                        print(f"[SHADOW] 圖片下載失敗：{e}")
 
                 # 分類意圖
                 classify_tree    = mission_data["classify_tree"]
@@ -603,22 +678,25 @@ def callback(oaid):
                 # 抽取欄位
                 values, missing, task_cfg = gather_fields(task_id, mission_data, user_text)
 
-                # 生成 AI 草稿
+                # 生成 AI 草稿（圖片訊息不跑下游，沒有意義）
                 ai_draft = ""
-                if not missing:
+                if not missing and msg_type != "image":
                     action  = task_cfg.get("action") or {}
                     cmd_url, _ = build_command(action, values)
                     _, info, _ = execute_command("GET", cmd_url, user_id)
                     ai_draft   = info or ""
 
-                # 儲存影子訊息
+                # 儲存影子訊息（user_id 改用 conv_id，sender 資訊另存）
                 save_shadow_message(
-                    user_id=user_id,
+                    user_id=conv_id,
                     oaid=oaid,
                     user_message=user_text,
                     intent=extracted_intent,
                     task_id=task_id or "",
-                    ai_draft=ai_draft
+                    ai_draft=ai_draft,
+                    image_path=image_path,
+                    sender_user_id=sender_user_id,
+                    sender_display_name=sender_display_name
                 )
                 print(f"[SHADOW] 已儲存，ai_draft={ai_draft[:50]}...")
                 continue  # 不回覆 LINE

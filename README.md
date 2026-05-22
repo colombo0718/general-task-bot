@@ -1,198 +1,165 @@
-# general-task-bot
+# General Task Bot（GTB）
 
-一個把 LINE 訊息轉成後端 API 任務的任務型 Bot。
+設定驅動的 LINE Bot 任務引擎。接收 LINE 訊息，用 LLM 判斷意圖、萃取欄位，呼叫後端 API 完成任務。
 
-這個專案的核心做法是：
+---
 
-1. 接收 LINE Official Account webhook 訊息
-2. 用 LLM 判斷使用者想做什麼
-3. 從訊息中萃取欄位
-4. 依照設定組成 API request
-5. 直接執行、要求人工確認，或排程稍後執行
+## 設計理念
 
-目前這個 repo 已支援多種模式，像是一般任務、POS 任務、門市任務，以及客服知識庫模式。實際使用哪一組規則，取決於啟動時載入的 `prompts_*.ini` 與 `mission_*.json`。
+GTB 不把業務邏輯寫死在 Python 裡。新增一個任務，通常只需要改設定檔：
 
-## 這個專案在做什麼
+- `prompts*.ini` — 告訴 LLM 要萃取什麼
+- `mission*.json` — 告訴系統怎麼分類意圖、需要哪些欄位、呼叫哪個 API
 
-這不是一個把業務流程硬寫死在 Python 裡的 bot，而是一個「設定驅動」的任務引擎。
+Python 主程式只是一個執行引擎，設定檔才是業務邏輯的所在。
 
-- `prompts*.ini` 定義 LLM extractor prompt
-- `mission*.json` 定義任務分類樹、欄位需求、確認策略、API URL
-- `main.py` 負責把 LINE 訊息、LLM 萃取結果、API 呼叫串起來
+---
 
-因此新增一個新任務，通常不需要大改主程式，更多時候是補 prompt 和任務設定。
+## 兩個啟動器
 
-## 核心流程
+### `main.py`（舊版）
+設定檔與程式放在同一個資料夾，適合單一專案使用。
 
-訊息處理主流程在 `main.py`：
+```bash
+python main.py cs 6001
+```
 
-1. LINE webhook 進到 `/callback/<oaid>`
-2. 依 `oaid` 找到該 OA 的 secret/token
-3. 使用 `classify_tree.prompt_key` 做意圖分類
-4. 找到對應 task
-5. 依 task 的 `fields` 逐一呼叫 extractor 萃取欄位
-6. 若欄位需要 reference，附加系統參考資訊給 LLM
-7. 若欄位有 `match_pool`，再做候選名單模糊比對
-8. 組出目標 API URL
-9. 依 `human_check` 決定直接執行、等待確認，或自動判斷
-10. 回傳執行結果給 LINE 使用者
+### `gtb.py`（新版，推薦）
+從執行當下的目錄讀設定，框架與專案分離，支援多專案部署。
 
-## 主要檔案
+```bash
+cd C:\path\to\your-project
+python C:\path\to\general-task-bot\gtb.py --conf cs --port 6001
+python C:\path\to\general-task-bot\gtb.py --conf cs --port 6003 --mode shadow
+```
 
-- [main.py](/c:/Users/USER/general-task-bot/main.py)
-  LINE webhook 入口、LLM 呼叫、欄位萃取、命令組裝、API 執行。
-- [prompts_system.ini](/c:/Users/USER/general-task-bot/prompts_system.ini)
-  跨模式共用的 extractor。
-- [prompts.ini](/c:/Users/USER/general-task-bot/prompts.ini)
-  預設模式的 prompt 設定。
-- [prompts_pos.ini](/c:/Users/USER/general-task-bot/prompts_pos.ini)
-  POS 模式 prompt。
-- [prompts_store.ini](/c:/Users/USER/general-task-bot/prompts_store.ini)
-  門市模式 prompt。
-- [prompts_cs.ini](/c:/Users/USER/general-task-bot/prompts_cs.ini)
-  客服知識庫模式 prompt。
-- [mission.json](/c:/Users/USER/general-task-bot/mission.json)
-  預設模式任務設定。
-- [mission_pos.json](/c:/Users/USER/general-task-bot/mission_pos.json)
-  POS 模式任務設定。
-- [mission_store.json](/c:/Users/USER/general-task-bot/mission_store.json)
-  門市模式任務設定。
-- [mission_cs.json](/c:/Users/USER/general-task-bot/mission_cs.json)
-  客服知識庫模式任務設定。
-- [todo_list.py](/c:/Users/USER/general-task-bot/todo_list.py)
-  排程任務 sqlite 存取。
-- [todo_worker.py](/c:/Users/USER/general-task-bot/todo_worker.py)
-  定時執行待辦任務。
-- [generate_customerlist_simple.py](/c:/Users/USER/general-task-bot/generate_customerlist_simple.py)
-  從 SQL Server 匯出客戶名單，供名稱模糊比對使用。
-- [docs/prompts_ini_guide.md](/c:/Users/USER/general-task-bot/docs/prompts_ini_guide.md)
-  `prompts.ini` 寫法說明。
-- [docs/mission_json_guide.md](/c:/Users/USER/general-task-bot/docs/mission_json_guide.md)
-  `mission.json` 寫法說明。
+`gtb.py` 參數：
 
-## 設定驅動架構
+| 參數 | 說明 | 預設 |
+|---|---|---|
+| `--conf` | 設定檔後綴（cs / pos / store） | 無（讀預設檔）|
+| `--port` | 監聽 port | 6000 |
+| `--mode` | `normal`=正常回覆，`shadow`=只記錄不回覆 | normal |
+
+---
+
+## 訊息處理流程
+
+```
+LINE 訊息進來
+  → 確認是否在回覆舊的待確認指令
+  → 判斷是否查看排程清單
+  → 萃取執行時間（run_at）
+  → 意圖分類（classify_tree）
+  → 欄位萃取（gather_fields）
+      └─ 有 match_pool → 中文拼音 + 字串相似度比對候選名單
+  → 組 API URL（build_command）
+  → 依 human_check 決定：直接執行 / 等待確認 / auto
+  → 執行 GET，回覆 LINE
+```
+
+---
+
+## 設定檔說明
 
 ### `prompts*.ini`
 
-每個 extractor 都是一段 prompt，輸出格式通常被嚴格限制成：
-
-- enum 值
+每個 extractor 是一段嚴格限制輸出格式的 prompt，回傳值通常是：
+- enum token（如 `queryKB`、`escalateSupport`）
 - 單一數字
-- 日期
-- `true` / `false`
-- `null`
-
-這樣 `main.py` 才能穩定把 LLM 輸出接到後續流程。
+- ISO 8601 日期
+- `true` / `false` / `null`
 
 ### `mission*.json`
 
-每個 mission 檔主要包含兩塊：
-
-- `classify_tree`
-  定義訊息先怎麼分類到某個 task
-- `tasks`
-  定義每個 task 需要哪些欄位，以及最後如何呼叫 API
-
-task 裡最重要的欄位有：
-
-- `human_check`
-  `false` 代表直接執行
-  `true` 代表一定要等使用者確認
-  `auto` 代表若使用者沒明確回覆，系統可自動採取預設行為
-- `fields`
-  每個欄位都可指定 `prompt_key`、`required`、`reference`、`match_pool`
-- `action`
-  定義 `method` 和 `url_template`
-
-## 名稱模糊比對
-
-專案有一套客戶名稱校正流程：
-
-1. 每次收到訊息時，先執行 [generate_customerlist_simple.py](/c:/Users/USER/general-task-bot/generate_customerlist_simple.py)
-2. 從資料庫重建 [customerlist.txt](/c:/Users/USER/general-task-bot/customerlist.txt)
-3. 若某欄位設定了 `match_pool`
-4. 將 LLM 萃取值與候選名單比對
-5. 目前使用中文拼音相似度加英文文字相似度做最佳匹配
-
-這是為了處理口語、語音辨識、同音字造成的客戶名稱偏差。
-
-## 排程與待辦
-
-如果使用者要求「稍後執行」而不是立刻執行：
-
-- `main.py` 會先把任務寫進 [todo_list.db](/c:/Users/USER/general-task-bot/todo_list.db)
-- [todo_worker.py](/c:/Users/USER/general-task-bot/todo_worker.py) 會定期掃描 pending task
-- 到時間後補送 API request
-
-資料表建立邏輯在 [todo_list.py](/c:/Users/USER/general-task-bot/todo_list.py)。
-
-## 執行需求
-
-這個 repo 要能正常跑起來，除了 Python 套件之外，還需要一些本地或私有設定：
-
-- `.env`
-  內含 LLM provider API keys，例如 `GROQ_API_KEY`、`HF_TOKEN`、`OPENROUTER_API_KEY`
-- `oa_registry.json`
-  LINE OA 對應表，存每個 `oaid` 的 `channel_secret` 與 `channel_access_token`
-- 可連線的 SQL Server
-  `generate_customerlist_simple.py` 需要連線到外部資料庫
-
-注意：`oa_registry.json` 被 `.gitignore` 排除了，所以 clone repo 後通常還不能直接啟動。
-
-## 啟動方式
-
-依模式選擇不同設定檔：
-
-```bash
-python main.py
-python main.py pos
-python main.py store
-python main.py cs
+```json
+{
+  "classify_tree": {
+    "prompt_key": "identify_needs",
+    "branch": [
+      { "match": "queryKB", "task_id": "query_knowledge_base" },
+      { "match": "null",    "task_id": "fallback_greeting" }
+    ]
+  },
+  "tasks": {
+    "query_knowledge_base": {
+      "human_check": "false",
+      "fields": {
+        "sections":     { "prompt_key": "get_cs_sections", "required": true },
+        "user_message": { "source": "raw", "required": true }
+      },
+      "action": {
+        "method": "GET",
+        "url_template": "https://example.com/api?sections={sections}&user_message={user_message}"
+      }
+    }
+  }
+}
 ```
 
-也可以指定 port：
+`human_check` 三種值：
+- `false` — 直接執行
+- `true` — 等待使用者明確確認
+- `auto` — 等待確認，但若回覆模糊則自動執行
 
-```bash
-python main.py cs 6000
+欄位 `source: "raw"` — 直接帶入使用者原始訊息，不跑 LLM。
+
+---
+
+## 影子模式（shadow mode）
+
+`--mode shadow` 啟動後，訊息不會回覆給使用者，只記錄到 `database/shadow.db`：
+
+```
+users 表            → user_id ↔ display_name
+messages_{user_id}  → 訊息、意圖分類、AI 草稿
 ```
 
-`main.py` 的設定選擇規則是：
+設計用途：讓 AI 在背後產生回覆草稿，客服人員審核後再自行發送，不讓 AI 直接對外回覆。
 
-- 沒給模式時，讀 `prompts.ini` 與 `mission.json`
-- 給 `cs` 時，讀 `prompts_cs.ini` 與 `mission_cs.json`
-- 給 `pos` 時，讀 `prompts_pos.ini` 與 `mission_pos.json`
+---
 
-## 開發時最常做的事
+## 多專案部署
 
-### 新增一個任務
+GTB 框架不動，每個專案自帶設定：
 
-1. 在對應的 `prompts_*.ini` 新增 extractor
-2. 在對應的 `mission_*.json` 新增分類分支
-3. 在對應 task 裡定義 `fields` 與 `action`
-4. 若欄位需要模糊比對，設定 `match_pool`
-5. 用真實訊息測一次分類、萃取、API 組裝是否正常
+```
+general-task-bot/            ← 框架（此 repo）
+├── gtb.py
+├── main.py
+├── todo_list.py
+├── prompts_system.ini
+└── .env
 
-### 調整 extractor
+your-project/                ← 各自的專案資料夾
+├── config/
+│   ├── prompts_cs.ini
+│   └── mission_cs.json
+├── database/
+│   ├── todo_list.db
+│   └── shadow.db
+└── oa_registry.json
+```
 
-1. 修改 prompt
-2. 確保輸出格式仍然穩定
-3. 若是日期或相對時間，留意 `reference` 是否要打開
+---
 
-### 調整確認邏輯
+## 必要的本地設定
 
-主要看 `human_check` 與 `todo_command` 的狀態流轉。
+這個 repo clone 下來無法直接啟動，還需要：
 
-## 已知現況
+| 檔案 | 說明 |
+|---|---|
+| `.env` | `GROQ_API_KEY`、`HF_TOKEN`、`OPENROUTER_API_KEY` |
+| `oa_registry.json` | 各 LINE OA 的 channel_secret / channel_access_token |
+| SQL Server 連線 | `generate_customerlist_simple.py` 需要 |
 
-- [README.md](/c:/Users/USER/general-task-bot/README.md) 原本幾乎沒有內容，這份文件是補上的專案導覽
-- [TODO.md](/c:/Users/USER/general-task-bot/TODO.md) 目前規劃中的重點是「欄位澄清機制」
-- 客服模式目前的主軸是：
-  查知識庫
-  升級真人支援
-  fallback 回覆
+`oa_registry.json` 已被 `.gitignore` 排除。
 
-## 延伸閱讀
+---
 
-- [docs/prompts_ini_guide.md](/c:/Users/USER/general-task-bot/docs/prompts_ini_guide.md)
-- [docs/mission_json_guide.md](/c:/Users/USER/general-task-bot/docs/mission_json_guide.md)
-- [TODO.md](/c:/Users/USER/general-task-bot/TODO.md)
+## 文件
+
+- [docs/gtb架構升級說明.md](docs/gtb架構升級說明.md) — main.py → gtb.py 差異說明
+- [docs/mission_json_guide.md](docs/mission_json_guide.md) — mission.json 寫法
+- [docs/prompts_ini_guide.md](docs/prompts_ini_guide.md) — prompts.ini 寫法
+- [TODO.md](TODO.md) — 欄位澄清機制開發計畫

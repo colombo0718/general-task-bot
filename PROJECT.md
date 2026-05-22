@@ -9,6 +9,7 @@ LINE webhook Flask 服務，透過 `mission*.json` + `prompts*.ini` 設定檔驅
 
 ## 部署方式
 
+### main.py（舊版，現有 bot 繼續用）
 ```bash
 python main.py pos      # POS 模式，port 預設 6000
 python main.py pos 6001 # 指定 port
@@ -17,9 +18,19 @@ python main.py store    # 門市模式
 python main.py          # 通用記帳模式
 ```
 
+### gtb.py（新版，多專案分離用）
+```bash
+# 從專案資料夾執行，自動讀取 config/ 與 database/
+cd C:\path\to\your-project
+python $GTB --conf cs --port 6003
+python $GTB --conf cs --port 6003 --mode shadow
+```
+
+`$GTB` 是 PowerShell 變數，指向 `general-task-bot/gtb.py`，設定在 `$PROFILE`。
+
 - 無 CI/CD，直接在機器上跑
-- Port 優先順序：env `PORT` > argv[2] > 6000
-- LINE webhook 路由：`/callback/<oaid>`，oaid 對應 `oa_registry.json`
+- LINE webhook 路由：`/callback/<oaid>`，oaid 對應各專案的 `oa_registry.json`
+- 詳見 [docs/gtb架構升級說明.md](docs/gtb架構升級說明.md)
 
 ---
 

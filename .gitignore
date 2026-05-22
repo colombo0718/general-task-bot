@@ -1,3 +1,21 @@
+# credentials / secrets
 .env
-.db
 oa_registry.json
+
+# runtime DB & state
+*.db
+.gtb_codex_session
+.gtb_codex_sessions/
+
+# python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# log / archive
+logs/
+*.log
+*.bak.*
+
+# claude code internal
+.claude/
